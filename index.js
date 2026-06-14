@@ -1,181 +1,129 @@
-const WebSocket = require('ws');
-const http = require('http');
-
-// --- 1. THE 100 SACRED COINS ---
-const TARGET_COINS = new Set([
-    "BTCUSDT", "ETHUSDT", "DOTUSDT", "HBARUSDT", "XRPUSDT", "LINKUSDT", "ARBUSDT",
-    "BNBUSDT", "SOLUSDT", "ADAUSDT", "DOGEUSDT", "TRXUSDT", "AVAXUSDT", "MATICUSDT",
-    "SHIBUSDT", "LTCUSDT", "UNIUSDT", "BCHUSDT", "ICPUSDT", "ETCUSDT", "NEARUSDT",
-    "ATOMUSDT", "OPUSDT", "XLMUSDT", "FILUSDT", "INJUSDT", "IMXUSDT", "APTUSDT",
-    "CROUSDT", "LDOUSDT", "VETUSDT", "MKRUSDT", "GRTUSDT", "RNDRUSDT", "SUIUSDT",
-    "AAVEUSDT", "ALGOUSDT", "EGLDUSDT", "AXSUSDT", "SANDUSDT", "MANAUSDT", "FTMUSDT",
-    "THETAUSDT", "XTZUSDT", "SNXUSDT", "NEOUSDT", "FLOWUSDT", "KAVAUSDT", "MINAUSDT",
-    "GALAUSDT", "APEUSDT", "DYDXUSDT", "LUNA2USDT", "EOSUSDT", "TWTUSDT", "ZILUSDT", 
-    "CRVUSDT", "GMTUSDT", "1INCHUSDT", "COMPUSDT", "STXUSDT", "XMRUSDT", "RUNEUSDT", 
-    "KLAYUSDT", "ARUSDT", "FETUSDT", "PAXGUSDT", "WLDUSDT", "WAVESUSDT", "ZECUSDT", 
-    "CAKEUSDT", "SEIUSDT", "GMXUSDT", "FXSUSDT", "DASHUSDT", "ENSUSDT", "PEPEUSDT", 
-    "CFXUSDT", "MASKUSDT", "ROSEUSDT", "LRCUSDT", "CVXUSDT", "WOOUSDT", "CELOUSDT", 
-    "IOTXUSDT", "FLOKIUSDT", "AGIXUSDT", "KSMUSDT", "CHZUSDT", "OCEANUSDT", "SUSHIUSDT",
-    "BATUSDT", "BANDUSDT", "QTUMUSDT", "ANKRUSDT", "IOTAUSDT", "ENJUSDT", "YFIUSDT",
-    "ONEUSDT", "STORJUSDT"
-]);
-
-const normalize = (s) => s.replace(/[-_]/g, '').replace('SWAP', '').replace('XBT', 'BTC').toUpperCase();
-
-const port = process.env.PORT || 10000;
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(getHTML());
-});
-const wss = new WebSocket.Server({ server });
-
-let stats = { Binance: 'OFF', Bybit: 'OFF', OKX: 'OFF', total: 0 };
-let clients = new Set();
-let engineActive = false;
-let remoteSockets = new Map();
-
-const broadcast = (payload) => {
-    const data = JSON.stringify(payload);
-    clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(data); });
-};
-
-const connectExch = (name, url, onOpen, onMsg) => {
-    const ws = new WebSocket(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    ws.on('open', () => { stats[name] = 'LIVE'; console.log(`>>> [${name}] GATE OPEN`); onOpen(ws); });
-    ws.on('message', (m) => { 
-        const txt = m.toString();
-        if (txt === "pong" || txt === "") return; // Safety check
-        try { onMsg(ws, JSON.parse(txt)); } catch(e){} 
-    });
-    ws.on('error', () => { stats[name] = 'ERROR'; });
-    ws.on('close', () => { 
-        stats[name] = 'OFF'; 
-        if (engineActive) setTimeout(() => connectExch(name, url, onOpen, onMsg), 5000); 
-    });
-    remoteSockets.set(name, ws);
-};
-
-const startEngines = () => {
-    if (engineActive) return;
-    engineActive = true;
-
-    // 1. BINANCE
-    connectExch('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr', () => {}, (ws, d) => {
-        const proc = (i) => { if(i.e === "forceOrder") { 
-            const sym = normalize(i.o.s);
-            if (TARGET_COINS.has(sym)) {
-                stats.total++; 
-                broadcast({ exch: 'Binance', symbol: sym, side: i.o.S === 'BUY' ? 'short' : 'long', price: parseFloat(i.o.p), value: Math.round(i.o.q * i.o.p) }); 
-            }
-        }};
-        if(Array.isArray(d)) d.forEach(proc); else proc(d);
-    });
-
-    // 2. BYBIT
-    connectExch('Bybit', 'wss://stream.bytick.com/v5/public/linear', 
-        (ws) => {
-            ws.send(JSON.stringify({"op": "subscribe", "args": ["liquidation.linear"]}));
-            ws.pingTimer = setInterval(() => ws.send(JSON.stringify({"op": "ping"})), 20000);
-        }, 
-        (ws, d) => {
-            if (d.data) {
-                const item = d.data;
-                const sym = normalize(item.symbol);
-                if (TARGET_COINS.has(sym)) {
-                    stats.total++;
-                    broadcast({ exch: 'Bybit', symbol: sym, side: item.side === 'Buy' ? 'short' : 'long', price: parseFloat(item.price), value: Math.round(item.size * item.price) });
-                }
-            }
-        }
-    );
-
-    // 3. OKX
-    connectExch('OKX', 'wss://ws.okx.com:8443/ws/v5/public', 
-        (ws) => {
-            ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]}));
-            ws.pingTimer = setInterval(() => ws.send("ping"), 20000);
-        }, 
-        (ws, d) => {
-            if (d.data && d.data[0]) {
-                const i = d.data[0];
-                const sym = normalize(i.instId);
-                if (TARGET_COINS.has(sym)) {
-                    stats.total++;
-                    broadcast({ exch: 'OKX', symbol: sym, side: i.side === 'buy' ? 'short' : 'long', price: parseFloat(i.bkPx), value: Math.round(i.sz * i.bkPx) });
-                }
-            }
-        }
-    );
-};
-
-const stopEngines = () => {
-    engineActive = false;
-    remoteSockets.forEach(ws => { clearInterval(ws.pingTimer); ws.close(); });
-    remoteSockets.clear();
-};
-
-wss.on('connection', (ws) => {
-    clients.add(ws);
-    startEngines();
-    ws.on('close', () => { clients.delete(ws); if (clients.size === 0) stopEngines(); });
-});
-
-setInterval(() => {
-    if (clients.size > 0) {
-        broadcast({ type: 'ping', status: stats });
-    }
-}, 30000);
-
-server.listen(port, () => console.log(`Palace LIVE on ${port}`));
-
 function getHTML() {
-    return `
-<!DOCTYPE html><html><head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FORBIDDEN PALACE</title>
-<style>
-    :root { --red: #ff3e3e; --green: #00ff9d; --bg: #030303; }
-    body { background: var(--bg); color: #fff; font-family: 'Courier New', monospace; margin: 0; padding: 20px; text-transform: uppercase; overflow: hidden; }
-    .header { display: flex; justify-content: space-between; border-bottom: 1px solid #222; padding-bottom: 10px; margin-bottom: 20px; }
-    #mon { font-size: 11px; color: #666; margin-bottom: 15px; background: #0a0a0a; padding: 5px; border: 1px solid #111; }
-    #f { height: 80vh; overflow-y: hidden; display: flex; flex-direction: column; gap: 6px; }
-    .row { display: grid; grid-template-columns: 80px 100px 100px 80px 120px 1fr; background: #080808; padding: 12px; border-left: 3px solid #333; font-size: 13px; transition: all 0.3s; }
-    .buy, .short { border-left-color: var(--green); color: var(--green); }
-    .sell, .long { border-left-color: var(--red); color: var(--red); }
-    .price { color: #888; }
-    .val { text-align: right; font-weight: bold; color: #fff; }
-</style></head>
+    return `<!DOCTYPE html>
+<html>
+<head>
+    <title>PALACE LIVE</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            background: #020202;
+            color: #e0e0e0;
+            font-family: 'Courier New', monospace;
+            padding: 20px;
+            text-transform: uppercase;
+            margin: 0;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #222;
+        }
+        .title {
+            font-weight: bold;
+            letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+        }
+        .dot {
+            height: 10px;
+            width: 10px;
+            background: #444;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 10px;
+            transition: background 0.3s ease;
+        }
+        #f {
+            margin-top: 15px;
+            height: calc(100vh - 70px);
+            overflow-y: auto;
+            padding-right: 5px;
+        }
+        /* شخصی‌سازی اسکرول‌بار که زشت نباشد */
+        #f::-webkit-scrollbar { width: 4px; }
+        #f::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
+
+        .row {
+            display: grid;
+            grid-template-columns: 80px 100px 100px 70px 1fr;
+            background: rgba(15, 15, 15, 0.6);
+            backdrop-filter: blur(5px);
+            padding: 12px;
+            border-left: 3px solid #333;
+            font-size: 13px;
+            margin-bottom: 6px;
+            border-radius: 0 6px 6px 0;
+            animation: fadeIn 0.2s ease-out;
+        }
+        .short { border-left-color: #ff4444; color: #ff4444; background: rgba(255, 68, 68, 0.03); }
+        .long { border-left-color: #00ff88; color: #00ff88; background: rgba(0, 255, 136, 0.03); }
+        
+        .time { color: #666; }
+        .exch { color: #888; font-size: 11px; font-weight: bold; }
+        .sym { color: #fff; font-weight: bold; }
+        .val { text-align: right; font-weight: bold; color: #fff; }
+        .long .val { color: #00ff88; }
+        .short .val { color: #ff4444; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
 <body>
     <div class="header">
-        <div style="color: gold; font-weight: bold;">🏰 FORBIDDEN PALACE</div>
-        <div id="status" style="color: var(--red); font-size: 10px;">YES IT'S LIVE BUT FORBIDDEN</div>
+        <div class="title"><span class="dot" id="d"></span>🏰 FORBIDDEN PALACE</div>
+        <div style="color: #ff4444; font-size: 11px; font-weight: bold; letter-spacing: 1px;">LIVE STREAMING</div>
     </div>
-    <div id="mon">INITIALIZING COMMAND CENTER...</div>
+    
     <div id="f"></div>
-    <script>
-        const wsUrl = window.location.origin.replace(/^http/, 'ws');
-        const f = document.getElementById('f'), m = document.getElementById('mon');
-        let ws;
 
-        function connect() {
-            ws = new WebSocket(wsUrl);
-            ws.onmessage = (e) => {
-                const d = JSON.parse(e.data);
-                if (d.type === 'ping') {
-                    m.innerText = "CAPTURES: " + d.status.total + " | B:" + d.status.Binance + " BB:" + d.status.Bybit + " OKX:" + d.status.OKX;
-                    return;
-                }
-                const r = document.createElement('div');
-                r.className = 'row ' + d.side;
-                const time = new Date().toLocaleTimeString([], {hour12:false});
-                r.innerHTML = "<span>"+time+"</span><span style='color:#666'>["+d.exch.toUpperCase()+"]</span><span>"+d.symbol+"</span><span>"+d.side.toUpperCase()+"</span><span class='price'>@"+d.price.toLocaleString()+"</span><span class='val'>$"+d.value.toLocaleString()+"</span>";
-                f.insertBefore(r, f.firstChild);
-                if (f.children.length > 35) f.removeChild(f.lastChild);
-            };
-            ws.onclose = () => setTimeout(connect, 2000);
-        }
-        connect();
+    <script>
+        const ws = new WebSocket(location.origin.replace('http', 'ws'));
+        const f = document.getElementById('f');
+        const d = document.getElementById('d');
+
+        ws.onmessage = (e) => {
+            const j = JSON.parse(e.data);
+            
+            // مهار کردن چشمک هارت‌بیت
+            if (j.type === 'ping') {
+                d.style.background = '#00ff88';
+                setTimeout(() => { d.style.background = '#444'; }, 400);
+                return;
+            }
+
+            // ساخت ردیف دیتای جدید به صورت استاندارد
+            const r = document.createElement('div');
+            r.className = 'row ' + j.side;
+            
+            // چیدمان ساختار داخلی ستون‌ها بر اساس گرید سیستم
+            r.innerHTML = \`
+                <span class="time">\${new Date().toLocaleTimeString([], {hour12: false})}</span>
+                <span class="exch">[\${j.exch.toUpperCase()}]</span>
+                <span class="sym">\${j.symbol}</span>
+                <span>\${j.side}</span>
+                <span class="val">$\${j.value.toLocaleString()}</span>
+            \`;
+
+            // هل دادن به اول لیست
+            f.insertBefore(r, f.firstChild);
+
+            // جلوگیری از سنگین شدن صفحه (حداکثر ۵۰ ردیف اخیر)
+            if (f.children.length > 50) {
+                f.removeChild(f.lastChild);
+            }
+        };
+
+        ws.onclose = () => {
+            d.style.background = '#ff4444';
+        };
     </script>
-</body></html>`;
+</body>
+</html>`;
 }
