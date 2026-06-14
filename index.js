@@ -43,7 +43,7 @@ const connectExch = (name, url, onOpen, onMsg) => {
     ws.on('open', () => { stats[name] = 'LIVE'; onOpen(ws); });
     ws.on('message', (m) => { 
         const txt = m.toString();
-        if (txt === "pong") return; // CRITICAL: Prevents SyntaxError crash
+        if (txt === "pong") return; // CRITICAL: Stop the SyntaxError crash
         try { onMsg(ws, JSON.parse(txt)); } catch(e){} 
     });
     ws.on('error', () => { stats[name] = 'ERROR'; });
@@ -62,15 +62,13 @@ const startEngines = () => {
     connectExch('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr', 
         () => { console.log('>>> [BINANCE] GATE OPEN'); }, 
         (ws, d) => {
-            const proc = (i) => { 
-                if(i.e === "forceOrder") { 
-                    const sym = normalize(i.o.s);
-                    if(TARGET_COINS.has(sym)) {
-                        stats.total++; 
-                        broadcast({ exch: 'Binance', symbol: sym, side: i.o.S === 'BUY' ? 'short' : 'long', value: Math.round(i.o.q * i.o.p) }); 
-                    }
-                } 
-            };
+            const proc = (i) => { if(i.e === "forceOrder") { 
+                const sym = normalize(i.o.s);
+                if(TARGET_COINS.has(sym)) {
+                    stats.total++; 
+                    broadcast({ exch: 'Binance', symbol: sym, side: i.o.S === 'BUY' ? 'short' : 'long', value: Math.round(i.o.q * i.o.p) }); 
+                }
+            }};
             if(Array.isArray(d)) d.forEach(proc); else proc(d);
         }
     );
@@ -84,11 +82,10 @@ const startEngines = () => {
         }, 
         (ws, d) => {
             if (d.data) {
-                const item = d.data;
-                const sym = normalize(item.symbol);
+                const sym = normalize(d.data.symbol);
                 if(TARGET_COINS.has(sym)) {
                     stats.total++;
-                    broadcast({ exch: 'Bybit', symbol: sym, side: item.side === 'Buy' ? 'short' : 'long', value: Math.round(item.size * item.price) });
+                    broadcast({ exch: 'Bybit', symbol: sym, side: d.data.side === 'Buy' ? 'short' : 'long', value: Math.round(d.data.size * d.data.price) });
                 }
             }
         }
@@ -103,11 +100,11 @@ const startEngines = () => {
         }, 
         (ws, d) => {
             if (d.data && d.data[0]) {
-                const item = d.data[0];
-                const sym = normalize(item.instId);
+                const i = d.data[0];
+                const sym = normalize(i.instId);
                 if(TARGET_COINS.has(sym)) {
                     stats.total++;
-                    broadcast({ exch: 'OKX', symbol: sym, side: item.side === 'buy' ? 'short' : 'long', value: Math.round(item.sz * item.bkPx) });
+                    broadcast({ exch: 'OKX', symbol: sym, side: i.side === 'buy' ? 'short' : 'long', value: Math.round(i.sz * i.bkPx) });
                 }
             }
         }
@@ -136,37 +133,42 @@ setInterval(() => {
 server.listen(port, () => console.log(`Palace LIVE on ${port}`));
 
 function getHTML() {
-    return `
-<!DOCTYPE html><html><head><title>FORBIDDEN PALACE</title>
-<style>
+    return `<!DOCTYPE html><html><head><title>FORBIDDEN PALACE</title><style>
     :root { --red: #ff3e3e; --green: #00ff9d; --bg: #030303; }
-    body { background: var(--bg); color: #fff; font-family: monospace; margin: 0; padding: 20px; text-transform: uppercase; overflow: hidden; }
+    body { background: var(--bg); color: #fff; font-family: 'Courier New', monospace; margin: 0; padding: 20px; text-transform: uppercase; overflow: hidden; }
     .header { display: flex; justify-content: space-between; border-bottom: 1px solid #222; padding-bottom: 10px; margin-bottom: 20px; }
     #f { height: 80vh; overflow: hidden; display: flex; flex-direction: column; gap: 5px; }
-    .row { display: grid; grid-template-columns: 80px 140px 120px 80px 1fr; background: #080808; padding: 12px; border-left: 2px solid #333; font-size: 13px; margin-bottom: 4px; }
+    .row { display: grid; grid-template-columns: 100px 140px 120px 80px 1fr; background: #080808; padding: 12px; border-left: 2px solid #333; font-size: 13px; margin-bottom: 4px; }
     .short { border-left-color: var(--green); color: var(--green); }
     .long { border-left-color: var(--red); color: var(--red); }
     .source { color: #666; font-weight: bold; }
-    .val { text-align: right; color: #fff; font-weight: bold; }
-</style></head>
-<body>
+    </style></head><body>
     <div class="header">
         <div style="color: gold; font-weight: bold;">🏰 FORBIDDEN PALACE</div>
-        <div style="color: var(--red); font-size: 10px;">YES IT'S LIVE BUT FORBIDDEN</div>
+        <div id="status" style="color: #444; font-size: 10px;">CONNECTING...</div>
     </div>
     <div id="f"></div>
     <script>
-        const ws = new WebSocket(location.origin.replace('http','ws'));
+        const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host;
+        const ws = new WebSocket(wsUrl);
         const f = document.getElementById('f');
+        const s = document.getElementById('status');
+        
+        ws.onopen = () => { s.innerText = "YES IT'S LIVE BUT FORBIDDEN"; s.style.color = "red"; };
+        
         ws.onmessage = (e) => {
             const d = JSON.parse(e.data);
             if (d.type === 'ping') return;
+            
             const r = document.createElement('div');
             r.className = 'row ' + d.side;
-            r.innerHTML = "<span>" + new Date().toLocaleTimeString([], {hour12:false}) + "</span><span class='source'>[" + d.exch.toUpperCase() + "]</span><span>" + d.symbol + "</span><span>" + d.side + "</span><span class='val'>$" + d.value.toLocaleString() + "</span>";
+            const time = new Date().toLocaleTimeString([], {hour12:false});
+            r.innerHTML = "<span>"+time+"</span><span class='source'>["+d.exch.toUpperCase()+"]</span><span>"+d.symbol+"</span><span>"+d.side.toUpperCase()+"</span><span style='text-align:right;font-weight:bold'>$"+d.value.toLocaleString()+"</span>";
+            
             f.insertBefore(r, f.firstChild);
             if (f.children.length > 40) f.removeChild(f.lastChild);
         };
-    </script>
-</body></html>`;
+        
+        ws.onclose = () => { s.innerText = "CONNECTION CLOSED"; s.style.color = "white"; };
+    </script></body></html>`;
 }
