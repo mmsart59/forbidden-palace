@@ -26,9 +26,10 @@ wss.on('connection', (clientSocket) => {
     const bn = new WebSocket('wss://dstream.binance.me/ws/!forceOrder@arr', {
         headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-    bn.on('message', (msg) => {
+        bn.on('message', (msg) => {
         const d = JSON.parse(msg);
         if (d.e === "forceOrder") {
+            console.log(`[Binance] Liq: ${d.o.s} ${d.o.S}`); // ADD THIS LINE
             broadcast({ source: 'Binance', symbol: d.o.s, side: d.o.S === 'BUY' ? 'short' : 'long', value: d.o.q * d.o.p });
         }
     });
