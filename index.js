@@ -3,17 +3,15 @@ const http = require('http');
 
 const port = process.env.PORT || 3000;
 
-// 1. Create the Web Server
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(getHTML()); // Serves the UI dashboard
+    res.end(getHTML());
 });
 
 const wss = new WebSocket.Server({ server });
 
-// 2. The Palace Aggregator
 wss.on('connection', (clientSocket) => {
-    console.log('New connection to Palace');
+    console.log('>>> New Connection to Palace');
     const connections = [];
 
     const broadcast = (data) => {
@@ -22,41 +20,43 @@ wss.on('connection', (clientSocket) => {
         }
     };
 
-    // --- BINANCE DSTREAM ---
-    const bn = new WebSocket('wss://dstream.binance.me/ws/!forceOrder@arr', {
+    // --- MAIN BINANCE USDT-M FUTURES ---
+    const bn = new WebSocket('wss://fstream.binance.com/ws/!forceOrder@arr', {
         headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-        bn.on('message', (msg) => {
+
+    bn.on('open', () => console.log('Connected to Binance Main Stream'));
+    
+    bn.on('message', (msg) => {
         const d = JSON.parse(msg);
         if (d.e === "forceOrder") {
-            console.log(`[Binance] Liq: ${d.o.s} ${d.o.S}`); // ADD THIS LINE
-            broadcast({ source: 'Binance', symbol: d.o.s, side: d.o.S === 'BUY' ? 'short' : 'long', value: d.o.q * d.o.p });
+            const val = Math.round(d.o.q * d.o.p);
+            // This will show up in your Render Logs:
+            console.log(`[LIQ] ${d.o.s} | ${d.o.S} | $${val.toLocaleString()}`);
+            
+            broadcast({ 
+                source: 'Binance', 
+                symbol: d.o.s, 
+                side: d.o.S === 'BUY' ? 'short' : 'long', 
+                value: val 
+            });
         }
     });
-    connections.push(bn);
+
+    bn.on('error', (e) => console.error('Binance Error:', e.message));
 
     // --- BYBIT ---
     const bb = new WebSocket('wss://stream.bybit.com/v5/public/linear');
-    bb.on('open', () => bb.send(JSON.stringify({"op": "subscribe", "args": ["liquidation.BTCUSDT"]})));
+    bb.on('open', () => bb.send(JSON.stringify({"op": "subscribe", "args": ["liquidation.BTCUSDT", "liquidation.ETHUSDT"]})));
     bb.on('message', (msg) => {
         const d = JSON.parse(msg).data;
         if (d) broadcast({ source: 'Bybit', symbol: d.symbol, side: d.side === 'Buy' ? 'short' : 'long', value: d.size * d.price });
     });
-    connections.push(bb);
-
-    // --- HYPERLIQUID ---
-    const hl = new WebSocket('wss://api.hyperliquid.xyz/ws');
-    hl.on('open', () => hl.send(JSON.stringify({"method": "subscribe", "subscription": {"type": "trades", "coin": "BTC"}})));
-    hl.on('message', (msg) => {
-        const d = JSON.parse(msg);
-        if (d.data && d.data[0].liquidation) {
-            broadcast({ source: 'Hyperliquid', symbol: d.data[0].coin, side: d.data[0].side === 'B' ? 'short' : 'long', value: d.data[0].sz * d.data[0].px });
-        }
-    });
-    connections.push(hl);
 
     clientSocket.on('close', () => {
-        connections.forEach(c => c.close());
+        console.log('Connection closed');
+        bn.close();
+        bb.close();
     });
 });
 
@@ -71,7 +71,7 @@ function getHTML() {
         .short { color: #ff3e3e; } .long { color: #00ff9d; }
     </style></head><body>
     <h2 style="color: gold">🏰 FORBIDDEN PALACE</h2>
-    <div id="status" style="color: red">Connecting to local stream...</div>
+    <div id="status" style="color: red">WAITING FOR GLOBAL DATA...</div>
     <div id="feed"></div>
     <script>
         const ws = new WebSocket(window.location.origin.replace('http', 'ws'));
@@ -83,6 +83,7 @@ function getHTML() {
             r.className = 'row ' + d.side;
             r.innerHTML = "<span>" + new Date().toLocaleTimeString() + "</span><span>[" + d.source + "]</span><span>" + d.symbol + "</span><span style='text-align:right'>$" + Math.round(d.value).toLocaleString() + "</span>";
             feed.insertBefore(r, feed.firstChild);
+            if (feed.children.length > 50) feed.removeChild(feed.lastChild);
         };
     </script></body></html>`;
 }
