@@ -58,16 +58,19 @@ const connectExch = (name, url, onOpen, onMsg) => {
 const startEngines = () => {
     if (engineActive) return;
     engineActive = true;
-    console.log('>>> IGNITION: CONNECTING TO GLOBAL EXCHANGES...');
+    console.log('>>> IGNITION: CONNECTING TO GLOBAL MARKETS...');
 
     // 1. BINANCE
     connectExch('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr', () => {}, (ws, d) => {
         const proc = (i) => { if(i.e === "forceOrder") { 
             const sym = normalize(i.o.s);
             if (TARGET_COINS.has(sym)) {
+                const price = parseFloat(i.o.p);
+                const quantity = parseFloat(i.o.q);
+                const value = Math.round(price * quantity);
                 stats.total++; 
-                broadcast({ exch: 'Binance', symbol: sym, side: i.o.S === 'BUY' ? 'short' : 'long', value: Math.round(i.o.q * i.o.p) }); 
-                console.log(`[CAPTURE] Binance: ${sym} $${Math.round(i.o.q * i.o.p)}`);
+                broadcast({ exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), value, price, quantity }); 
+                if (value > 1000) console.log(`[Binance] Captured: ${sym} $${value}`);
             }
         }};
         if(Array.isArray(d)) d.forEach(proc); else proc(d);
@@ -81,13 +84,14 @@ const startEngines = () => {
         }, 
         (ws, d) => {
             if (d.data) {
-                const item = d.data;
-                const sym = normalize(item.symbol);
+                const sym = normalize(d.data.symbol);
                 if (TARGET_COINS.has(sym)) {
+                    const price = parseFloat(d.data.price);
+                    const quantity = parseFloat(d.data.size);
+                    const value = Math.round(price * quantity);
                     stats.total++;
-                    const val = Math.round(item.size * item.price);
-                    broadcast({ exch: 'Bybit', symbol: sym, side: item.side === 'Buy' ? 'short' : 'long', value: val });
-                    console.log(`[CAPTURE] Bybit: ${sym} $${val}`);
+                    broadcast({ exch: 'Bybit', symbol: sym, side: d.data.side.toLowerCase(), value, price, quantity });
+                    if (value > 1000) console.log(`[Bybit] Captured: ${sym} $${value}`);
                 }
             }
         }
@@ -104,10 +108,12 @@ const startEngines = () => {
                 const i = d.data[0];
                 const sym = normalize(i.instId);
                 if (TARGET_COINS.has(sym)) {
+                    const price = parseFloat(i.bkPx);
+                    const quantity = parseFloat(i.sz);
+                    const value = Math.round(price * quantity);
                     stats.total++;
-                    const val = Math.round(i.sz * i.bkPx);
-                    broadcast({ exch: 'OKX', symbol: sym, side: i.side === 'buy' ? 'short' : 'long', value: val });
-                    console.log(`[CAPTURE] OKX: ${sym} $${val}`);
+                    broadcast({ exch: 'OKX', symbol: sym, side: i.side.toLowerCase(), value, price, quantity });
+                    if (value > 1000) console.log(`[OKX] Captured: ${sym} $${value}`);
                 }
             }
         }
@@ -126,7 +132,6 @@ wss.on('connection', (ws) => {
     console.log(`>>> APP CONNECTED. Active Listeners: ${clients.size}`);
     ws.on('close', () => { 
         clients.delete(ws); 
-        console.log(`>>> APP DISCONNECTED. Active Listeners: ${clients.size}`);
         if (clients.size === 0) stopEngines(); 
     });
 });
@@ -134,8 +139,8 @@ wss.on('connection', (ws) => {
 setInterval(() => {
     if (clients.size > 0) {
         broadcast({ type: 'ping' });
-        console.log(`[STATUS] Captures: ${stats.total} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX}`);
+        console.log(`[STATUS] Total Captures: ${stats.total} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX}`);
     }
 }, 30000);
 
-server.listen(port, () => console.log(`DATA ENGINE READY ON PORT ${port}`));
+server.listen(port, () => console.log(`MASTER ENGINE READY ON ${port}`));
