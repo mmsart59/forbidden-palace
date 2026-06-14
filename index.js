@@ -1,7 +1,7 @@
 const WebSocket = require('ws');
 const http = require('http');
 
-// --- THE SACRED COINS ---
+// --- 1. THE 100 SACRED COINS ---
 const TARGET_COINS = new Set([
     "BTCUSDT", "ETHUSDT", "DOTUSDT", "HBARUSDT", "XRPUSDT", "LINKUSDT", "ARBUSDT",
     "BNBUSDT", "SOLUSDT", "ADAUSDT", "DOGEUSDT", "TRXUSDT", "AVAXUSDT", "MATICUSDT",
@@ -41,10 +41,10 @@ const broadcast = (payload) => {
 
 const connectExch = (name, url, onOpen, onMsg) => {
     const ws = new WebSocket(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    ws.on('open', () => { stats[name] = 'LIVE'; onOpen(ws); });
+    ws.on('open', () => { stats[name] = 'LIVE'; console.log(`>>> [${name}] GATE OPEN`); onOpen(ws); });
     ws.on('message', (m) => { 
         const txt = m.toString();
-        if (txt === "pong") return; 
+        if (txt === "pong" || txt === "") return; // Safety check
         try { onMsg(ws, JSON.parse(txt)); } catch(e){} 
     });
     ws.on('error', () => { stats[name] = 'ERROR'; });
@@ -65,7 +65,7 @@ const startEngines = () => {
             const sym = normalize(i.o.s);
             if (TARGET_COINS.has(sym)) {
                 stats.total++; 
-                broadcast({ exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), price: parseFloat(i.o.p), value: Math.round(i.o.q * i.o.p) }); 
+                broadcast({ exch: 'Binance', symbol: sym, side: i.o.S === 'BUY' ? 'short' : 'long', price: parseFloat(i.o.p), value: Math.round(i.o.q * i.o.p) }); 
             }
         }};
         if(Array.isArray(d)) d.forEach(proc); else proc(d);
@@ -83,7 +83,7 @@ const startEngines = () => {
                 const sym = normalize(item.symbol);
                 if (TARGET_COINS.has(sym)) {
                     stats.total++;
-                    broadcast({ exch: 'Bybit', symbol: sym, side: item.side.toLowerCase(), price: parseFloat(item.price), value: Math.round(item.size * item.price) });
+                    broadcast({ exch: 'Bybit', symbol: sym, side: item.side === 'Buy' ? 'short' : 'long', price: parseFloat(item.price), value: Math.round(item.size * item.price) });
                 }
             }
         }
@@ -101,7 +101,7 @@ const startEngines = () => {
                 const sym = normalize(i.instId);
                 if (TARGET_COINS.has(sym)) {
                     stats.total++;
-                    broadcast({ exch: 'OKX', symbol: sym, side: i.side.toLowerCase(), price: parseFloat(i.bkPx), value: Math.round(i.sz * i.bkPx) });
+                    broadcast({ exch: 'OKX', symbol: sym, side: i.side === 'buy' ? 'short' : 'long', price: parseFloat(i.bkPx), value: Math.round(i.sz * i.bkPx) });
                 }
             }
         }
@@ -132,44 +132,50 @@ function getHTML() {
     return `
 <!DOCTYPE html><html><head>
 <meta charset="UTF-8">
-<title>PALACE</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FORBIDDEN PALACE</title>
 <style>
     :root { --red: #ff3e3e; --green: #00ff9d; --bg: #030303; }
     body { background: var(--bg); color: #fff; font-family: 'Courier New', monospace; margin: 0; padding: 20px; text-transform: uppercase; overflow: hidden; }
     .header { display: flex; justify-content: space-between; border-bottom: 1px solid #222; padding-bottom: 10px; margin-bottom: 20px; }
-    #mon { font-size: 11px; color: #666; margin-bottom: 15px; }
+    #mon { font-size: 11px; color: #666; margin-bottom: 15px; background: #0a0a0a; padding: 5px; border: 1px solid #111; }
     #f { height: 80vh; overflow-y: hidden; display: flex; flex-direction: column; gap: 6px; }
-    .row { display: grid; grid-template-columns: 80px 100px 100px 80px 120px 1fr; background: #080808; padding: 12px; border-left: 3px solid #333; font-size: 13px; }
+    .row { display: grid; grid-template-columns: 80px 100px 100px 80px 120px 1fr; background: #080808; padding: 12px; border-left: 3px solid #333; font-size: 13px; transition: all 0.3s; }
     .buy, .short { border-left-color: var(--green); color: var(--green); }
     .sell, .long { border-left-color: var(--red); color: var(--red); }
-    .price { color: #aaa; }
+    .price { color: #888; }
     .val { text-align: right; font-weight: bold; color: #fff; }
 </style></head>
 <body>
     <div class="header">
         <div style="color: gold; font-weight: bold;">🏰 FORBIDDEN PALACE</div>
-        <div style="color: var(--red); font-size: 10px;">YES IT'S LIVE BUT FORBIDDEN</div>
+        <div id="status" style="color: var(--red); font-size: 10px;">YES IT'S LIVE BUT FORBIDDEN</div>
     </div>
-    <div id="mon">CONNECTING...</div>
+    <div id="mon">INITIALIZING COMMAND CENTER...</div>
     <div id="f"></div>
     <script>
         const wsUrl = window.location.origin.replace(/^http/, 'ws');
-        const ws = new WebSocket(wsUrl);
         const f = document.getElementById('f'), m = document.getElementById('mon');
-        
-        ws.onmessage = (e) => {
-            const d = JSON.parse(e.data);
-            if (d.type === 'ping') {
-                m.innerText = "CAPTURES: " + d.status.total + " | " + JSON.stringify(d.status);
-                return;
-            }
-            const r = document.createElement('div');
-            r.className = 'row ' + d.side;
-            const time = new Date().toLocaleTimeString([], {hour12:false});
-            r.innerHTML = "<span>"+time+"</span><span style='color:#666'>["+d.exch.toUpperCase()+"]</span><span>"+d.symbol+"</span><span>"+d.side.toUpperCase()+"</span><span class='price'>@"+d.price.toLocaleString()+"</span><span class='val'>$"+d.value.toLocaleString()+"</span>";
-            f.insertBefore(r, f.firstChild);
-            if (f.children.length > 35) f.removeChild(f.lastChild);
-        };
+        let ws;
+
+        function connect() {
+            ws = new WebSocket(wsUrl);
+            ws.onmessage = (e) => {
+                const d = JSON.parse(e.data);
+                if (d.type === 'ping') {
+                    m.innerText = "CAPTURES: " + d.status.total + " | B:" + d.status.Binance + " BB:" + d.status.Bybit + " OKX:" + d.status.OKX;
+                    return;
+                }
+                const r = document.createElement('div');
+                r.className = 'row ' + d.side;
+                const time = new Date().toLocaleTimeString([], {hour12:false});
+                r.innerHTML = "<span>"+time+"</span><span style='color:#666'>["+d.exch.toUpperCase()+"]</span><span>"+d.symbol+"</span><span>"+d.side.toUpperCase()+"</span><span class='price'>@"+d.price.toLocaleString()+"</span><span class='val'>$"+d.value.toLocaleString()+"</span>";
+                f.insertBefore(r, f.firstChild);
+                if (f.children.length > 35) f.removeChild(f.lastChild);
+            };
+            ws.onclose = () => setTimeout(connect, 2000);
+        }
+        connect();
     </script>
 </body></html>`;
 }
