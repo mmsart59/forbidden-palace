@@ -58,16 +58,14 @@ const connectExch = (name, url, onOpen, onMsg) => {
 const startEngines = () => {
     if (engineActive) return;
     engineActive = true;
-    console.log('>>> [PALACE] IGNITION');
 
     // 1. BINANCE
     connectExch('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr', () => {}, (ws, d) => {
         const proc = (i) => { if(i.e === "forceOrder") { 
             const sym = normalize(i.o.s);
-            const val = Math.round(parseFloat(i.o.q) * parseFloat(i.o.p));
             if (TARGET_COINS.has(sym)) {
                 stats.total++; 
-                broadcast({ exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), value: val }); 
+                broadcast({ exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), price: parseFloat(i.o.p), value: Math.round(i.o.q * i.o.p) }); 
             }
         }};
         if(Array.isArray(d)) d.forEach(proc); else proc(d);
@@ -81,11 +79,11 @@ const startEngines = () => {
         }, 
         (ws, d) => {
             if (d.data) {
-                const sym = normalize(d.data.symbol);
-                const val = Math.round(parseFloat(d.data.size) * parseFloat(d.data.price));
+                const item = d.data;
+                const sym = normalize(item.symbol);
                 if (TARGET_COINS.has(sym)) {
                     stats.total++;
-                    broadcast({ exch: 'Bybit', symbol: sym, side: d.data.side.toLowerCase(), value: val });
+                    broadcast({ exch: 'Bybit', symbol: sym, side: item.side.toLowerCase(), price: parseFloat(item.price), value: Math.round(item.size * item.price) });
                 }
             }
         }
@@ -99,11 +97,11 @@ const startEngines = () => {
         }, 
         (ws, d) => {
             if (d.data && d.data[0]) {
-                const sym = normalize(d.data[0].instId);
-                const val = Math.round(parseFloat(d.data[0].sz) * parseFloat(d.data[0].bkPx));
+                const i = d.data[0];
+                const sym = normalize(i.instId);
                 if (TARGET_COINS.has(sym)) {
                     stats.total++;
-                    broadcast({ exch: 'OKX', symbol: sym, side: d.data[0].side.toLowerCase(), value: val });
+                    broadcast({ exch: 'OKX', symbol: sym, side: i.side.toLowerCase(), price: parseFloat(i.bkPx), value: Math.round(i.sz * i.bkPx) });
                 }
             }
         }
@@ -125,7 +123,6 @@ wss.on('connection', (ws) => {
 setInterval(() => {
     if (clients.size > 0) {
         broadcast({ type: 'ping', status: stats });
-        console.log(`--- [LOG] Total Capture:${stats.total} | Clients:${clients.size} | Status: B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX} ---`);
     }
 }, 30000);
 
@@ -140,18 +137,20 @@ function getHTML() {
     :root { --red: #ff3e3e; --green: #00ff9d; --bg: #030303; }
     body { background: var(--bg); color: #fff; font-family: 'Courier New', monospace; margin: 0; padding: 20px; text-transform: uppercase; overflow: hidden; }
     .header { display: flex; justify-content: space-between; border-bottom: 1px solid #222; padding-bottom: 10px; margin-bottom: 20px; }
-    #mon { font-size: 10px; color: #666; margin-bottom: 10px; }
-    #f { height: 80vh; overflow-y: hidden; display: flex; flex-direction: column; gap: 5px; }
-    .row { display: grid; grid-template-columns: 100px 120px 120px 80px 1fr; background: #080808; padding: 12px; border-left: 2px solid #333; font-size: 13px; }
+    #mon { font-size: 11px; color: #666; margin-bottom: 15px; }
+    #f { height: 80vh; overflow-y: hidden; display: flex; flex-direction: column; gap: 6px; }
+    .row { display: grid; grid-template-columns: 80px 100px 100px 80px 120px 1fr; background: #080808; padding: 12px; border-left: 3px solid #333; font-size: 13px; }
     .buy, .short { border-left-color: var(--green); color: var(--green); }
     .sell, .long { border-left-color: var(--red); color: var(--red); }
+    .price { color: #aaa; }
+    .val { text-align: right; font-weight: bold; color: #fff; }
 </style></head>
 <body>
     <div class="header">
         <div style="color: gold; font-weight: bold;">🏰 FORBIDDEN PALACE</div>
-        <div id="status" style="color: var(--red); font-size: 10px;">YES IT'S LIVE BUT FORBIDDEN</div>
+        <div style="color: var(--red); font-size: 10px;">YES IT'S LIVE BUT FORBIDDEN</div>
     </div>
-    <div id="mon">WAITING FOR DATA...</div>
+    <div id="mon">CONNECTING...</div>
     <div id="f"></div>
     <script>
         const wsUrl = window.location.origin.replace(/^http/, 'ws');
@@ -167,11 +166,10 @@ function getHTML() {
             const r = document.createElement('div');
             r.className = 'row ' + d.side;
             const time = new Date().toLocaleTimeString([], {hour12:false});
-            r.innerHTML = "<span>"+time+"</span><span style='color:#888'>["+d.exch.toUpperCase()+"]</span><span>"+d.symbol+"</span><span>"+d.side.toUpperCase()+"</span><span style='text-align:right;font-weight:bold'>$"+d.value.toLocaleString()+"</span>";
+            r.innerHTML = "<span>"+time+"</span><span style='color:#666'>["+d.exch.toUpperCase()+"]</span><span>"+d.symbol+"</span><span>"+d.side.toUpperCase()+"</span><span class='price'>@"+d.price.toLocaleString()+"</span><span class='val'>$"+d.value.toLocaleString()+"</span>";
             f.insertBefore(r, f.firstChild);
-            if (f.children.length > 40) f.removeChild(f.lastChild);
+            if (f.children.length > 35) f.removeChild(f.lastChild);
         };
-        ws.onerror = (err) => { console.error("Palace WS Error:", err); };
     </script>
 </body></html>`;
 }
