@@ -33,12 +33,9 @@ let clients = new Set();
 let engineActive = false;
 let remoteSockets = new Map();
 
-// --- THE BRIDGE: Sends data to your App/Browser ---
 const broadcast = (payload) => {
     const data = JSON.stringify(payload);
-    clients.forEach(c => { 
-        if (c.readyState === WebSocket.OPEN) c.send(data); 
-    });
+    clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(data); });
 };
 
 const connectExch = (name, url, onOpen, onMsg) => {
@@ -46,7 +43,7 @@ const connectExch = (name, url, onOpen, onMsg) => {
     ws.on('open', () => { stats[name] = 'LIVE'; onOpen(ws); });
     ws.on('message', (m) => { 
         const txt = m.toString();
-        if (txt === "pong") return; // Prevent OKX text crash
+        if (txt === "pong") return; // CRITICAL: Prevents SyntaxError crash
         try { onMsg(ws, JSON.parse(txt)); } catch(e){} 
     });
     ws.on('error', () => { stats[name] = 'ERROR'; });
@@ -68,10 +65,9 @@ const startEngines = () => {
             const proc = (i) => { 
                 if(i.e === "forceOrder") { 
                     const sym = normalize(i.o.s);
-                    const val = Math.round(i.o.q * i.o.p);
-                    if (TARGET_COINS.has(sym)) {
+                    if(TARGET_COINS.has(sym)) {
                         stats.total++; 
-                        broadcast({ exch: 'Binance', symbol: sym, side: i.o.S === 'BUY' ? 'short' : 'long', value: val }); 
+                        broadcast({ exch: 'Binance', symbol: sym, side: i.o.S === 'BUY' ? 'short' : 'long', value: Math.round(i.o.q * i.o.p) }); 
                     }
                 } 
             };
@@ -82,6 +78,7 @@ const startEngines = () => {
     // 2. BYBIT
     connectExch('Bybit', 'wss://stream.bytick.com/v5/public/linear', 
         (ws) => {
+            console.log('>>> [BYBIT] GATE OPEN');
             ws.send(JSON.stringify({"op": "subscribe", "args": ["liquidation.linear"]}));
             ws.pingTimer = setInterval(() => ws.send(JSON.stringify({"op": "ping"})), 20000);
         }, 
@@ -89,7 +86,7 @@ const startEngines = () => {
             if (d.data) {
                 const item = d.data;
                 const sym = normalize(item.symbol);
-                if (TARGET_COINS.has(sym)) {
+                if(TARGET_COINS.has(sym)) {
                     stats.total++;
                     broadcast({ exch: 'Bybit', symbol: sym, side: item.side === 'Buy' ? 'short' : 'long', value: Math.round(item.size * item.price) });
                 }
@@ -100,6 +97,7 @@ const startEngines = () => {
     // 3. OKX
     connectExch('OKX', 'wss://ws.okx.com:8443/ws/v5/public', 
         (ws) => {
+            console.log('>>> [OKX] GATE OPEN');
             ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]}));
             ws.pingTimer = setInterval(() => ws.send("ping"), 20000);
         }, 
@@ -107,7 +105,7 @@ const startEngines = () => {
             if (d.data && d.data[0]) {
                 const item = d.data[0];
                 const sym = normalize(item.instId);
-                if (TARGET_COINS.has(sym)) {
+                if(TARGET_COINS.has(sym)) {
                     stats.total++;
                     broadcast({ exch: 'OKX', symbol: sym, side: item.side === 'buy' ? 'short' : 'long', value: Math.round(item.sz * item.bkPx) });
                 }
@@ -138,7 +136,9 @@ setInterval(() => {
 server.listen(port, () => console.log(`Palace LIVE on ${port}`));
 
 function getHTML() {
-    return `<!DOCTYPE html><html><head><title>FORBIDDEN PALACE</title><style>
+    return `
+<!DOCTYPE html><html><head><title>FORBIDDEN PALACE</title>
+<style>
     :root { --red: #ff3e3e; --green: #00ff9d; --bg: #030303; }
     body { background: var(--bg); color: #fff; font-family: monospace; margin: 0; padding: 20px; text-transform: uppercase; overflow: hidden; }
     .header { display: flex; justify-content: space-between; border-bottom: 1px solid #222; padding-bottom: 10px; margin-bottom: 20px; }
@@ -146,16 +146,27 @@ function getHTML() {
     .row { display: grid; grid-template-columns: 80px 140px 120px 80px 1fr; background: #080808; padding: 12px; border-left: 2px solid #333; font-size: 13px; margin-bottom: 4px; }
     .short { border-left-color: var(--green); color: var(--green); }
     .long { border-left-color: var(--red); color: var(--red); }
-    </style></head><body>
-    <div class="header"><div style="color: gold">🏰 FORBIDDEN PALACE</div><div style="color: var(--red); font-size: 10px;">YES IT'S LIVE BUT FORBIDDEN</div></div>
+    .source { color: #666; font-weight: bold; }
+    .val { text-align: right; color: #fff; font-weight: bold; }
+</style></head>
+<body>
+    <div class="header">
+        <div style="color: gold; font-weight: bold;">🏰 FORBIDDEN PALACE</div>
+        <div style="color: var(--red); font-size: 10px;">YES IT'S LIVE BUT FORBIDDEN</div>
+    </div>
     <div id="f"></div>
     <script>
-        const ws=new WebSocket(location.origin.replace('http','ws')), f=document.getElementById('f');
-        ws.onmessage=(e)=>{
-            const d=JSON.parse(e.data); if(d.type==='ping') return;
-            const r=document.createElement('div'); r.className='row '+d.side;
-            r.innerHTML='<span>'+new Date().toLocaleTimeString([],{hour12:false})+'</span><span style="color:#888">['+d.exch.toUpperCase()+']</span><span>'+d.symbol+'</span><span>'+d.side.toUpperCase()+'</span><span style="text-align:right;font-weight:bold">$'+d.value.toLocaleString()+'</span>';
-            f.insertBefore(r,f.firstChild); if(f.children.length>40) f.removeChild(f.lastChild);
+        const ws = new WebSocket(location.origin.replace('http','ws'));
+        const f = document.getElementById('f');
+        ws.onmessage = (e) => {
+            const d = JSON.parse(e.data);
+            if (d.type === 'ping') return;
+            const r = document.createElement('div');
+            r.className = 'row ' + d.side;
+            r.innerHTML = "<span>" + new Date().toLocaleTimeString([], {hour12:false}) + "</span><span class='source'>[" + d.exch.toUpperCase() + "]</span><span>" + d.symbol + "</span><span>" + d.side + "</span><span class='val'>$" + d.value.toLocaleString() + "</span>";
+            f.insertBefore(r, f.firstChild);
+            if (f.children.length > 40) f.removeChild(f.lastChild);
         };
-    </script></body></html>`;
+    </script>
+</body></html>`;
 }
