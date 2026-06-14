@@ -1,7 +1,6 @@
 const WebSocket = require('ws');
 const http = require('http');
 
-// --- THE SACRED COINS ---
 const TARGET_COINS = new Set([
     "BTCUSDT", "ETHUSDT", "DOTUSDT", "HBARUSDT", "XRPUSDT", "LINKUSDT", "ARBUSDT",
     "BNBUSDT", "SOLUSDT", "ADAUSDT", "DOGEUSDT", "TRXUSDT", "AVAXUSDT", "MATICUSDT",
@@ -31,123 +30,93 @@ const wss = new WebSocket.Server({ server });
 
 let stats = { Binance: 'OFF', Bybit: 'OFF', OKX: 'OFF', total: 0 };
 let clients = new Set();
+let engineActive = false;
+let remoteSockets = new Map();
 
 const broadcast = (payload) => {
     const data = JSON.stringify(payload);
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(data); });
 };
 
-// 1. BINANCE
-const startBinance = () => {
-    const ws = new WebSocket('wss://fstream.binance.com/ws/!forceOrder@arr', { headers: {'User-Agent': 'Mozilla/5.0'} });
-    ws.on('open', () => { stats.Binance = 'LIVE'; console.log('>>> [BINANCE] GATE OPEN'); });
-    ws.on('message', (msg) => {
-        try {
-            const dataStr = msg.toString();
-            if (dataStr === "" || dataStr === "pong") return;
-            const d = JSON.parse(dataStr);
-            const processItem = (i) => {
-                if (i.e === "forceOrder") {
-                    const val = Math.round(parseFloat(i.o.q) * parseFloat(i.o.p));
-                    const sym = normalize(i.o.s);
-                    if (TARGET_COINS.has(sym) && val > 100) {
-                        stats.total++;
-                        broadcast({ exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), value: val });
-                    }
-                }
-            };
-            if (Array.isArray(d)) d.forEach(processItem); else processItem(d);
-        } catch (e) { }
+const connectExch = (name, url, onOpen, onMsg) => {
+    const ws = new WebSocket(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    ws.on('open', () => { stats[name] = 'LIVE'; onOpen(ws); });
+    ws.on('message', (m) => { try { onMsg(ws, JSON.parse(m)); } catch(e){} });
+    ws.on('error', () => { stats[name] = 'ERROR'; });
+    ws.on('close', () => { 
+        stats[name] = 'OFF'; 
+        if (engineActive) setTimeout(() => connectExch(name, url, onOpen, onMsg), 5000); 
     });
-    ws.on('close', () => { stats.Binance = 'OFF'; setTimeout(startBinance, 5000); });
+    remoteSockets.set(name, ws);
 };
 
-// 2. BYBIT
-const startBybit = () => {
-    const ws = new WebSocket('wss://stream.bytick.com/v5/public/linear');
-    ws.on('open', () => { 
-        stats.Bybit = 'LIVE'; console.log('>>> [BYBIT] GATE OPEN');
-        ws.send(JSON.stringify({"op": "subscribe", "args": ["liquidation.linear"]}));
-        ws.pingInterval = setInterval(() => ws.send(JSON.stringify({"op":"ping"})), 20000);
-    });
-    ws.on('message', (msg) => {
-        try {
-            const dataStr = msg.toString();
-            const d = JSON.parse(dataStr).data;
-            if (d) {
-                const val = Math.round(parseFloat(d.size) * parseFloat(d.price));
-                const sym = normalize(d.symbol);
-                if (TARGET_COINS.has(sym) && val > 100) {
-                    stats.total++;
-                    broadcast({ exch: 'Bybit', symbol: sym, side: d.side.toLowerCase(), value: val });
-                }
+const startEngines = () => {
+    if (engineActive) return;
+    engineActive = true;
+
+    // 1. BINANCE (Correct Topic)
+    connectExch('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr', 
+        () => { console.log('>>> [BINANCE] GATE OPEN'); }, 
+        (ws, d) => {
+            const proc = (i) => { if(i.e === "forceOrder") { stats.total++; broadcast({ exch: 'Binance', symbol: normalize(i.o.s), side: i.o.S === 'BUY' ? 'short' : 'long', value: Math.round(i.o.q * i.o.p) }); } };
+            if(Array.isArray(d)) d.forEach(proc); else proc(d);
+        }
+    );
+
+    // 2. BYBIT (Corrected V5 Topic)
+    connectExch('Bybit', 'wss://stream.bytick.com/v5/public/linear', 
+        (ws) => {
+            console.log('>>> [BYBIT] GATE OPEN');
+            ws.send(JSON.stringify({"op": "subscribe", "args": ["liquidation.linear"]})); // Global Linear Topic
+            ws.pingTimer = setInterval(() => ws.send(JSON.stringify({"op": "ping"})), 20000);
+        }, 
+        (ws, d) => {
+            if (d.data) {
+                const item = d.data;
+                stats.total++;
+                broadcast({ exch: 'Bybit', symbol: normalize(item.symbol), side: item.side === 'Buy' ? 'short' : 'long', value: Math.round(item.size * item.price) });
             }
-        } catch (e) { }
-    });
-    ws.on('close', () => { clearInterval(ws.pingInterval); stats.Bybit = 'OFF'; setTimeout(startBybit, 5000); });
-};
+        }
+    );
 
-// 3. OKX
-const startOKX = () => {
-    const ws = new WebSocket('wss://ws.okx.com:8443/ws/v5/public');
-    ws.on('open', () => { 
-        stats.OKX = 'LIVE'; console.log('>>> [OKX] GATE OPEN');
-        ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]}));
-        ws.pingInterval = setInterval(() => ws.send("ping"), 20000);
-    });
-    ws.on('message', (msg) => {
-        const text = msg.toString();
-        if (text === "pong") return; // CRASH FIX
-        try {
-            const d = JSON.parse(text).data;
-            if (d && d[0]) {
-                const val = Math.round(parseFloat(d[0].sz) * parseFloat(d[0].bkPx));
-                const sym = normalize(d[0].instId);
-                if (TARGET_COINS.has(sym) && val > 100) {
-                    stats.total++;
-                    broadcast({ exch: 'OKX', symbol: sym, side: d[0].side.toLowerCase(), value: val });
-                }
+    // 3. OKX (Corrected instType)
+    connectExch('OKX', 'wss://ws.okx.com:8443/ws/v5/public', 
+        (ws) => {
+            console.log('>>> [OKX] GATE OPEN');
+            ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]}));
+            ws.pingTimer = setInterval(() => ws.send("ping"), 20000);
+        }, 
+        (ws, d) => {
+            if (d.data && d.data[0]) {
+                const item = d.data[0];
+                stats.total++;
+                broadcast({ exch: 'OKX', symbol: normalize(item.instId), side: item.side === 'buy' ? 'short' : 'long', value: Math.round(item.sz * item.bkPx) });
             }
-        } catch (e) { }
-    });
-    ws.on('close', () => { clearInterval(ws.pingInterval); stats.OKX = 'OFF'; setTimeout(startOKX, 5000); });
+        }
+    );
 };
 
-startBinance();
-startBybit();
-startOKX();
+const stopEngines = () => {
+    engineActive = false;
+    remoteSockets.forEach(ws => { clearInterval(ws.pingTimer); ws.close(); });
+    remoteSockets.clear();
+};
 
 wss.on('connection', (ws) => {
     clients.add(ws);
-    ws.on('close', () => clients.delete(ws));
+    startEngines();
+    ws.on('close', () => { clients.delete(ws); if (clients.size === 0) stopEngines(); });
 });
 
 setInterval(() => {
-    if (clients.size > 0) broadcast({ type: 'ping' });
-    console.log(`--- [HEARTBEAT] Captures:${stats.total} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX} ---`);
+    if (clients.size > 0) {
+        broadcast({ type: 'ping' });
+        console.log(`--- [HEARTBEAT] Clients:${clients.size} | Total Captures:${stats.total} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX} ---`);
+    }
 }, 30000);
 
 server.listen(port, () => console.log(`Palace LIVE on ${port}`));
 
 function getHTML() {
-    return `<!DOCTYPE html><html><head><title>FORBIDDEN PALACE</title><style>
-    :root { --red: #ff3e3e; --green: #00ff9d; --bg: #030303; }
-    body { background: var(--bg); color: #fff; font-family: monospace; margin: 0; padding: 20px; text-transform: uppercase; overflow: hidden; }
-    .header { display: flex; justify-content: space-between; border-bottom: 1px solid #222; padding-bottom: 10px; margin-bottom: 20px; }
-    #f { height: 80vh; overflow-y: hidden; display: flex; flex-direction: column; gap: 4px; }
-    .row { display: grid; grid-template-columns: 80px 140px 120px 80px 1fr; background: #080808; padding: 12px; border-left: 2px solid #333; font-size: 13px; margin-bottom: 4px; }
-    .buy, .short { border-left-color: var(--green); color: var(--green); }
-    .sell, .long { border-left-color: var(--red); color: var(--red); }
-    </style></head><body>
-    <div class="header"><div style="color: gold">🏰 FORBIDDEN PALACE</div><div style="color: var(--red); font-size: 10px;">YES IT'S LIVE BUT FORBIDDEN</div></div>
-    <div id="f"></div>
-    <script>
-        const ws=new WebSocket(location.origin.replace('http','ws')), f=document.getElementById('f');
-        ws.onmessage=(e)=>{
-            const d=JSON.parse(e.data); if(d.type==='ping') return;
-            const r=document.createElement('div'); r.className='row '+d.side;
-            r.innerHTML='<span>'+new Date().toLocaleTimeString([],{hour12:false})+'</span><span style="color:#888">['+d.exch.toUpperCase()+']</span><span>'+d.symbol+'</span><span>'+d.side.toUpperCase()+'</span><span style="text-align:right;font-weight:bold">$'+d.value.toLocaleString()+'</span>';
-            f.insertBefore(r,f.firstChild); if(f.children.length>40) f.removeChild(f.lastChild);
-        };
-    </script></body></html>`;
+    return `<!DOCTYPE html><html><head><title>PALACE</title><style>body{background:#000;color:#fff;font-family:monospace;padding:20px;text-transform:uppercase;overflow:hidden;} .row{display:grid;grid-template-columns:100px 120px 120px 80px 1fr;background:#080808;padding:12px;border-left:2px solid #333;font-size:13px;margin-bottom:4px;} .short{border-left-color:#f44;color:#f44;} .long{border-left-color:#0f8;color:#0f8;} .dot{height:8px;width:8px;background:#444;border-radius:50%;display:inline-block;margin-right:10px;}</style></head><body><div style="display:flex;justify-content:space-between"><div><span class="dot" id="d"></span>🏰 FORBIDDEN PALACE</div><div style="color:#f44;font-size:10px">YES IT'S LIVE BUT FORBIDDEN</div></div><div id="f" style="margin-top:20px;height:80vh"></div><script>const ws=new WebSocket(location.origin.replace('http','ws')),f=document.getElementById('f'),d=document.getElementById('d');ws.onmessage=(e)=>{const j=JSON.parse(e.data);if(j.type==='ping'){d.style.background='#0f8';setTimeout(()=>{d.style.background='#444'},500);return;}const r=document.createElement('div');r.className='row '+j.side;r.innerHTML='<span>'+new Date().toLocaleTimeString([],{hour12:false})+'</span><span style="color:#666">['+j.exch.toUpperCase()+']</span><span>'+j.symbol+'</span><span>'+j.side+'</span><span style="text-align:right;font-weight:bold">$'+j.value.toLocaleString()+'</span>';f.insertBefore(r,f.firstChild);if(f.children.length>40)f.removeChild(f.lastChild);};ws.onclose=()=>{d.style.background='red'};</script></body></html>`;
 }
