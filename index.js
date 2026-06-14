@@ -1,7 +1,7 @@
 const WebSocket = require('ws');
 const http = require('http');
 
-// --- 1. THE SACRED COINS ---
+// --- 1. THE 100 SACRED COINS ---
 const TARGET_COINS = new Set([
     "BTCUSDT", "ETHUSDT", "DOTUSDT", "HBARUSDT", "XRPUSDT", "LINKUSDT", "ARBUSDT",
     "BNBUSDT", "SOLUSDT", "ADAUSDT", "DOGEUSDT", "TRXUSDT", "AVAXUSDT", "MATICUSDT",
@@ -25,7 +25,7 @@ const normalize = (s) => s.replace(/[-_]/g, '').replace('SWAP', '').replace('XBT
 const port = process.env.PORT || 10000;
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('PALACE DATA ENGINE IS LIVE');
+    res.end('2026 PALACE ENGINE IS LIVE');
 });
 const wss = new WebSocket.Server({ server });
 
@@ -41,13 +41,24 @@ const broadcast = (payload) => {
 
 const connectExch = (name, url, onOpen, onMsg) => {
     const ws = new WebSocket(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    ws.on('open', () => { stats[name] = 'LIVE'; onOpen(ws); });
+    ws.on('open', () => { 
+        stats[name] = 'LIVE'; 
+        console.log(`>>> [${name}] CONNECTED`);
+        onOpen(ws); 
+    });
     ws.on('message', (m) => { 
         const txt = m.toString();
-        if (txt === "pong") return; 
-        try { onMsg(ws, JSON.parse(txt)); } catch(e){} 
+        if (txt === "pong" || txt === "") return; // CRITICAL: Stop OKX "pong" crash
+        try { 
+            const d = JSON.parse(txt);
+            if (d.e === "serverShutdown") { console.log(`!!! [${name}] SHUTDOWN WARNING`); return; }
+            onMsg(ws, d); 
+        } catch(e){} 
     });
-    ws.on('error', () => { stats[name] = 'ERROR'; });
+    ws.on('error', (e) => { 
+        stats[name] = 'ERROR'; 
+        console.log(`!!! [${name}] ERR:`, e.message);
+    });
     ws.on('close', () => { 
         stats[name] = 'OFF'; 
         if (engineActive) setTimeout(() => connectExch(name, url, onOpen, onMsg), 5000); 
@@ -58,46 +69,44 @@ const connectExch = (name, url, onOpen, onMsg) => {
 const startEngines = () => {
     if (engineActive) return;
     engineActive = true;
-    console.log('>>> IGNITION: CONNECTING TO GLOBAL MARKETS...');
+    console.log('>>> 2026 IGNITION SEQUENCE');
 
-    // 1. BINANCE
-    connectExch('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr', () => {}, (ws, d) => {
-        const proc = (i) => { if(i.e === "forceOrder") { 
+    // 1. BINANCE 2026 (New Market Endpoint)
+    connectExch('Binance', 'wss://fstream.binance.com/market/ws/!forceOrder@arr', () => {}, (ws, d) => {
+        const process = (i) => { if(i.e === "forceOrder") { 
             const sym = normalize(i.o.s);
             if (TARGET_COINS.has(sym)) {
-                const price = parseFloat(i.o.p);
-                const quantity = parseFloat(i.o.q);
-                const value = Math.round(price * quantity);
+                const p = parseFloat(i.o.ap || i.o.p); // Use Average Price
+                const q = parseFloat(i.o.q);
                 stats.total++; 
-                broadcast({ exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), value, price, quantity }); 
-                if (value > 1000) console.log(`[Binance] Captured: ${sym} $${value}`);
+                broadcast({ exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), value: p * q, price: p, quantity: q }); 
             }
         }};
-        if(Array.isArray(d)) d.forEach(proc); else proc(d);
+        if(Array.isArray(d)) d.forEach(process); else process(d);
     });
 
-    // 2. BYBIT
+    // 2. BYBIT 2026 (Global All-Liquidation Topic)
     connectExch('Bybit', 'wss://stream.bytick.com/v5/public/linear', 
         (ws) => {
-            ws.send(JSON.stringify({"op": "subscribe", "args": ["liquidation.linear"]}));
+            ws.send(JSON.stringify({"op": "subscribe", "args": ["allLiquidation.*"]}));
             ws.pingTimer = setInterval(() => ws.send(JSON.stringify({"op": "ping"})), 20000);
         }, 
         (ws, d) => {
-            if (d.data) {
-                const sym = normalize(d.data.symbol);
-                if (TARGET_COINS.has(sym)) {
-                    const price = parseFloat(d.data.price);
-                    const quantity = parseFloat(d.data.size);
-                    const value = Math.round(price * quantity);
-                    stats.total++;
-                    broadcast({ exch: 'Bybit', symbol: sym, side: d.data.side.toLowerCase(), value, price, quantity });
-                    if (value > 1000) console.log(`[Bybit] Captured: ${sym} $${value}`);
-                }
+            if (d.topic && d.topic.startsWith("allLiquidation") && d.data) {
+                d.data.forEach(item => {
+                    const sym = normalize(item.s);
+                    if (TARGET_COINS.has(sym)) {
+                        const p = parseFloat(item.p);
+                        const q = parseFloat(item.v);
+                        stats.total++;
+                        broadcast({ exch: 'Bybit', symbol: sym, side: item.S.toLowerCase(), value: p * q, price: p, quantity: q });
+                    }
+                });
             }
         }
     );
 
-    // 3. OKX
+    // 3. OKX 2026 (Tokyo Infrastructure)
     connectExch('OKX', 'wss://ws.okx.com:8443/ws/v5/public', 
         (ws) => {
             ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]}));
@@ -108,12 +117,10 @@ const startEngines = () => {
                 const i = d.data[0];
                 const sym = normalize(i.instId);
                 if (TARGET_COINS.has(sym)) {
-                    const price = parseFloat(i.bkPx);
-                    const quantity = parseFloat(i.sz);
-                    const value = Math.round(price * quantity);
+                    const p = parseFloat(i.bkPx);
+                    const q = parseFloat(i.sz);
                     stats.total++;
-                    broadcast({ exch: 'OKX', symbol: sym, side: i.side.toLowerCase(), value, price, quantity });
-                    if (value > 1000) console.log(`[OKX] Captured: ${sym} $${value}`);
+                    broadcast({ exch: 'OKX', symbol: sym, side: i.side.toLowerCase(), value: p * q, price: p, quantity: q });
                 }
             }
         }
@@ -129,7 +136,6 @@ const stopEngines = () => {
 wss.on('connection', (ws) => {
     clients.add(ws);
     startEngines();
-    console.log(`>>> APP CONNECTED. Active Listeners: ${clients.size}`);
     ws.on('close', () => { 
         clients.delete(ws); 
         if (clients.size === 0) stopEngines(); 
@@ -139,8 +145,8 @@ wss.on('connection', (ws) => {
 setInterval(() => {
     if (clients.size > 0) {
         broadcast({ type: 'ping' });
-        console.log(`[STATUS] Total Captures: ${stats.total} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX}`);
+        console.log(`[2026 HEARTBEAT] Captures: ${stats.total} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX}`);
     }
 }, 30000);
 
-server.listen(port, () => console.log(`MASTER ENGINE READY ON ${port}`));
+server.listen(port, () => console.log(`2026 ENGINE LIVE ON ${port}`));
