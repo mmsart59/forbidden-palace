@@ -1,0 +1,13 @@
+{
+  "name": "forbidden-palace",
+  "version": "1.0.0",
+  "description": "Global Liquidation Aggregator",
+  "main": "index.js",
+  "dependencies": {
+    "ws": "^8.16.0",
+    "node-fetch": "^2.7.0"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}
