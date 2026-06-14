@@ -1,7 +1,6 @@
 const WebSocket = require('ws');
 const http = require('http');
 
-// --- 1. THE SACRED COINS ---
 const TARGET_COINS = new Set([
     "BTCUSDT", "ETHUSDT", "DOTUSDT", "HBARUSDT", "XRPUSDT", "LINKUSDT", "ARBUSDT",
     "BNBUSDT", "SOLUSDT", "ADAUSDT", "DOGEUSDT", "TRXUSDT", "AVAXUSDT", "MATICUSDT",
@@ -29,76 +28,73 @@ const server = http.createServer((req, res) => {
 });
 const wss = new WebSocket.Server({ server });
 
-// Shared state for logs
-let stats = { Binance: 'WAIT', Bybit: 'WAIT', OKX: 'WAIT', total: 0 };
+let stats = { Binance: 'OFF', Bybit: 'OFF', OKX: 'OFF', total: 0 };
+let clients = new Set();
+let remoteSockets = [];
 
-wss.on('connection', (palaceClient) => {
-    console.log('>>> [PALACE] New client connected');
-    const remoteSockets = [];
-
-    const broadcast = (exch, symbol, side, value) => {
-        const cleanSymbol = normalize(symbol);
-        if (TARGET_COINS.has(cleanSymbol) && value > 10) { // Lowered to $10 for testing
-            stats.total++;
-            const payload = { exch, symbol: cleanSymbol, side, value: Math.round(value) };
-            console.log(`[${exch}] LIQ: ${cleanSymbol} | $${payload.value}`);
-            if (palaceClient.readyState === WebSocket.OPEN) palaceClient.send(JSON.stringify(payload));
-        }
-    };
-
-    const startBinance = () => {
-        const ws = new WebSocket('wss://fstream.binance.com/ws/!forceOrder@arr', { headers: {'User-Agent': 'Mozilla/5.0'} });
-        ws.on('open', () => { console.log('>>> [BINANCE] Connected'); stats.Binance = 'LIVE'; });
-        ws.on('message', (msg) => {
-            const data = JSON.parse(msg);
-            if (data.e === "forceOrder") broadcast('Binance', data.o.s, data.o.S === 'BUY' ? 'short' : 'long', data.o.q * data.o.p);
+const broadcast = (exch, symbol, side, value) => {
+    const cleanSymbol = normalize(symbol);
+    if (TARGET_COINS.has(cleanSymbol) && value > 100) {
+        stats.total++;
+        const payload = JSON.stringify({ exch, symbol: cleanSymbol, side, value: Math.round(value) });
+        clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) client.send(payload);
         });
-        ws.on('error', (e) => { console.log('!!! [BINANCE] Error:', e.message); stats.Binance = 'ERROR'; });
-        ws.on('close', () => { stats.Binance = 'CLOSED'; setTimeout(startBinance, 5000); });
-        remoteSockets.push(ws);
-    };
+    }
+};
 
-    const startBybit = () => {
-        const ws = new WebSocket('wss://stream.bybit.com/v5/public/linear');
-        ws.on('open', () => { 
-            console.log('>>> [BYBIT] Connected'); stats.Bybit = 'LIVE';
-            ws.send(JSON.stringify({"op": "subscribe", "args": ["liquidation.BTCUSDT", "liquidation.ETHUSDT", "liquidation.SOLUSDT"]}));
-        });
-        ws.on('message', (msg) => {
-            const d = JSON.parse(msg).data;
-            if (d) broadcast('Bybit', d.symbol, d.side === 'Buy' ? 'short' : 'long', d.size * d.price);
-        });
-        ws.on('error', (e) => { console.log('!!! [BYBIT] Error:', e.message); stats.Bybit = 'ERROR'; });
-        ws.on('close', () => { stats.Bybit = 'CLOSED'; setTimeout(startBybit, 5000); });
-        remoteSockets.push(ws);
-    };
+// --- ON-DEMAND ENGINE LOGIC ---
 
-    const startOKX = () => {
-        const ws = new WebSocket('wss://wspap.okx.com:8443/ws/v5/public');
-        ws.on('open', () => { 
-            console.log('>>> [OKX] Connected'); stats.OKX = 'LIVE';
-            ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "ANY"}]}));
-        });
-        ws.on('message', (msg) => {
-            const d = JSON.parse(msg).data;
-            if (d) broadcast('OKX', d[0].instId, d[0].side === 'buy' ? 'short' : 'long', d[0].sz * d[0].bkPx);
-        });
-        ws.on('error', (e) => { console.log('!!! [OKX] Error:', e.message); stats.OKX = 'ERROR'; });
-        ws.on('close', () => { stats.OKX = 'CLOSED'; setTimeout(startOKX, 5000); });
-        remoteSockets.push(ws);
-    };
+const startEngines = () => {
+    if (remoteSockets.length > 0) return; // Already running
+    console.log('>>> [PALACE] Activating engines (Client connected)');
+    
+    // Binance
+    const bn = new WebSocket('wss://fstream.binance.com/ws/!forceOrder@arr', { headers: {'User-Agent': 'Mozilla/5.0'} });
+    bn.on('open', () => stats.Binance = 'LIVE');
+    bn.on('message', (msg) => {
+        const d = JSON.parse(msg);
+        if (d.e === "forceOrder") broadcast('Binance', d.o.s, d.o.S === 'BUY' ? 'short' : 'long', d.o.q * d.o.p);
+    });
+    bn.on('close', () => stats.Binance = 'OFF');
+    remoteSockets.push(bn);
 
-    startBinance();
-    startBybit();
-    startOKX();
+    // Bybit
+    const bb = new WebSocket('wss://stream.bybit.com/v5/public/linear');
+    bb.on('open', () => { 
+        stats.Bybit = 'LIVE';
+        bb.send(JSON.stringify({"op": "subscribe", "args": ["liquidation.BTCUSDT", "liquidation.ETHUSDT", "liquidation.SOLUSDT"]}));
+    });
+    bb.on('message', (msg) => {
+        const d = JSON.parse(msg).data;
+        if (d) broadcast('Bybit', d.symbol, d.side === 'Buy' ? 'short' : 'long', d.size * d.price);
+    });
+    bb.on('close', () => stats.Bybit = 'OFF');
+    remoteSockets.push(bb);
+};
 
-    palaceClient.on('close', () => remoteSockets.forEach(s => s.close()));
+const stopEngines = () => {
+    console.log('>>> [PALACE] Deactivating engines (No clients left)');
+    remoteSockets.forEach(s => s.close());
+    remoteSockets = [];
+    stats.Binance = stats.Bybit = stats.OKX = 'OFF';
+};
+
+wss.on('connection', (ws) => {
+    clients.add(ws);
+    startEngines(); // Wake up Binance/Bybit when app connects
+    
+    ws.on('close', () => {
+        clients.delete(ws);
+        if (clients.size === 0) stopEngines(); // Go to sleep when app closes
+    });
 });
 
-// HEARTBEAT LOGS (Every 30 seconds in Render Console)
 setInterval(() => {
-    console.log(`--- [HEARTBEAT] Status: B:${stats.Binance} | BB:${stats.Bybit} | OKX:${stats.OKX} | Total Liquidations: ${stats.total} ---`);
-}, 30000);
+    if (clients.size > 0) {
+        console.log(`--- [ACTIVE] Clients: ${clients.size} | Capture Total: ${stats.total} ---`);
+    }
+}, 60000);
 
 server.listen(port, () => console.log(`Palace Server LIVE on ${port}`));
 
