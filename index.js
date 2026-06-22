@@ -7,7 +7,7 @@ const TARGET_COINS = new Set([
     "BNBUSDT", "SOLUSDT", "ADAUSDT", "DOGEUSDT", "TRXUSDT", "AVAXUSDT", "MATICUSDT",
     "SHIBUSDT", "LTCUSDT", "UNIUSDT", "BCHUSDT", "ICPUSDT", "ETCUSDT", "NEARUSDT",
     "ATOMUSDT", "OPUSDT", "XLMUSDT", "FILUSDT", "INJUSDT", "IMXUSDT", "APTUSDT",
-    "CROUSDT", "LDOUSDT", "VETUSDT", "MKRUSDT", "GRTUSDT", "RNDRUSDT", "SUIUSDT",
+    "CROUSDT", "LDOUSDT", "VETUSDT", "MKRUSDT", "GRTUSDT", "SUIUSDT",
     "AAVEUSDT", "ALGOUSDT", "EGLDUSDT", "AXSUSDT", "SANDUSDT", "MANAUSDT", "FTMUSDT",
     "THETAUSDT", "XTZUSDT", "SNXUSDT", "NEOUSDT", "FLOWUSDT", "KAVAUSDT", "MINAUSDT",
     "GALAUSDT", "APEUSDT", "DYDXUSDT", "LUNA2USDT", "EOSUSDT", "TWTUSDT", "ZILUSDT",
@@ -17,7 +17,7 @@ const TARGET_COINS = new Set([
     "CFXUSDT", "MASKUSDT", "ROSEUSDT", "LRCUSDT", "CVXUSDT", "WOOUSDT", "CELOUSDT",
     "IOTXUSDT", "FLOKIUSDT", "AGIXUSDT", "KSMUSDT", "CHZUSDT", "OCEANUSDT", "SUSHIUSDT",
     "BATUSDT", "BANDUSDT", "QTUMUSDT", "ANKRUSDT", "IOTAUSDT", "ENJUSDT", "YFIUSDT",
-    "ONEUSDT", "STORJUSDT"
+    "ONEUSDT", "STORJUSDT", "RENDERUSDT" // Updated from RNDRUSDT
 ]);
 
 const normalize = (s) => s.replace(/[-_]/g, '').replace('SWAP', '').replace('XBT', 'BTC').toUpperCase();
@@ -30,10 +30,9 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server });
 
 // --- MEMORY & PROXY STATE ---
-const MAX_HISTORY = 1000;
 let liquidationHistory = [];
-let tickerMap = {}; // New: symbol -> { p, v, c }
-let stats = { Binance: 'OFF', Bybit: 'OFF', OKX: 'OFF', total: 0 };
+let tickerMap = {};
+let stats = { total: 0, BinanceLiq: 'OFF', BinanceTickers: 'OFF', Bybit: 'OFF', OKX: 'OFF' };
 let clients = new Set();
 let engineActive = false;
 let remoteSockets = new Map();
@@ -41,17 +40,22 @@ let sleepTimer = null;
 
 const broadcast = (payload) => {
     const data = JSON.stringify(payload);
-    clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(data); });
+    clients.forEach(c => { 
+        if (c.readyState === WebSocket.OPEN) {
+            try { c.send(data); } catch(e){}
+        } 
+    });
 };
 
 const trackAndBroadcast = (payload) => {
     stats.total++;
     liquidationHistory.push(payload);
-    if (liquidationHistory.length > MAX_HISTORY) liquidationHistory.shift();
+    if (liquidationHistory.length > 1000) liquidationHistory.shift();
     broadcast(payload);
 };
 
 const connectExch = (name, url, onOpen, onMsg) => {
+    console.log(`>>> Attempting connection to ${name}...`);
     const ws = new WebSocket(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     ws.on('open', () => {
         stats[name] = 'LIVE';
@@ -59,21 +63,21 @@ const connectExch = (name, url, onOpen, onMsg) => {
         onOpen(ws);
     });
     ws.on('message', (m) => {
-        const txt = m.toString();
-        if (txt === "pong" || txt === "") return;
         try {
-            const d = JSON.parse(txt);
-            if (d.e === "serverShutdown") { console.log(`!!! [${name}] SHUTDOWN WARNING`); return; }
+            const d = JSON.parse(m.toString());
             onMsg(ws, d);
         } catch(e){}
     });
     ws.on('error', (e) => {
         stats[name] = 'ERROR';
-        console.log(`!!! [${name}] ERR:`, e.message);
+        console.log(`!!! [${name}] ${name} ERR:`, e.message);
     });
     ws.on('close', () => {
         stats[name] = 'OFF';
-        if (engineActive) setTimeout(() => { if (engineActive) connectExch(name, url, onOpen, onMsg); }, 5000);
+        console.log(`!!! [${name}] CLOSED`);
+        if (engineActive) {
+            setTimeout(() => { if (engineActive) connectExch(name, url, onOpen, onMsg); }, 5000);
+        }
     });
     remoteSockets.set(name, ws);
 };
@@ -83,8 +87,8 @@ const startEngines = () => {
     engineActive = true;
     console.log('>>> 2026 IGNITION SEQUENCE');
 
-    // 1. BINANCE LIQUIDATIONS
-    connectExch('Binance', 'wss://fstream.binance.com/market/ws/!forceOrder@arr', () => {}, (ws, d) => {
+    // 1. BINANCE LIQUIDATIONS (FIXED URL: removed /market)
+    connectExch('BinanceLiq', 'wss://fstream.binance.com/ws/!forceOrder@arr', () => {}, (ws, d) => {
         const process = (i) => { if(i.e === "forceOrder") {
             const sym = normalize(i.o.s);
             if (TARGET_COINS.has(sym)) {
@@ -96,7 +100,7 @@ const startEngines = () => {
         if(Array.isArray(d)) d.forEach(process); else process(d);
     });
 
-    // 2. BINANCE TICKERS (NEW: Proxy Engine)
+    // 2. BINANCE TICKERS
     connectExch('BinanceTickers', 'wss://fstream.binance.com/ws/!ticker@arr', () => {}, (ws, d) => {
         if (!Array.isArray(d)) return;
         d.forEach(t => {
@@ -118,7 +122,7 @@ const startEngines = () => {
             ws.pingTimer = setInterval(() => ws.send(JSON.stringify({"op": "ping"})), 20000);
         },
         (ws, d) => {
-            if (d.topic && d.topic.startsWith("liquidation") && d.data) {
+            if (d.data && d.topic && d.topic.startsWith("liquidation")) {
                 const items = Array.isArray(d.data) ? d.data : [d.data];
                 items.forEach(item => {
                     const sym = normalize(item.symbol || item.s);
@@ -138,10 +142,10 @@ const startEngines = () => {
     connectExch('OKX', 'wss://ws.okx.com:8443/ws/v5/public',
         (ws) => {
             ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]}));
-            ws.pingTimer = setInterval(() => ws.send("ping"), 20000);
+            ws.pingTimer = setInterval(() => ws.send(JSON.stringify({"op": "ping"})), 20000);
         },
         (ws, d) => {
-            if (d.data && d.data[0]) {
+            if (d.data) {
                 d.data.forEach(i => {
                     const sym = normalize(i.instId);
                     if (TARGET_COINS.has(sym)) {
@@ -156,13 +160,11 @@ const startEngines = () => {
 };
 
 const stopEngines = () => {
-    console.log('>>> NO CLIENTS. AUTO-SLEEP ACTIVATED.');
     engineActive = false;
-    remoteSockets.forEach(ws => { if(ws.pingTimer) clearInterval(ws.pingTimer); ws.terminate(); });
+    remoteSockets.forEach(ws => { if(ws.pingTimer) clearInterval(ws.pingTimer); try { ws.terminate(); } catch(e){} });
     remoteSockets.clear();
 };
 
-// --- SELECTIVE BROADCAST (Every 3s) ---
 setInterval(() => {
     clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN && client.subscribedCoins && client.subscribedCoins.size > 0) {
@@ -171,49 +173,40 @@ setInterval(() => {
                 if (tickerMap[sym]) updates[sym] = tickerMap[sym];
             });
             if (Object.keys(updates).length > 0) {
-                client.send(JSON.stringify({ type: 'ticker_batch', data: updates }));
+                try { client.send(JSON.stringify({ type: 'ticker_batch', data: updates })); } catch(e){}
             }
         }
     });
 }, 3000);
 
 wss.on('connection', (ws) => {
-    console.log('>>> NEW APP CLIENT CONNECTED');
+    console.log('>>> APP CLIENT CONNECTED');
     if (sleepTimer) { clearTimeout(sleepTimer); sleepTimer = null; }
-    
     clients.add(ws);
     ws.subscribedCoins = new Set();
     startEngines();
 
-    liquidationHistory.slice(-50).forEach(item => ws.send(JSON.stringify(item)));
+    liquidationHistory.slice(-50).forEach(item => { try { ws.send(JSON.stringify(item)); } catch(e){} });
 
     ws.on('message', (msg) => {
         try {
             const cmd = JSON.parse(msg.toString());
             if (cmd.op === 'subscribe_tickers') {
                 ws.subscribedCoins = new Set(cmd.args.map(s => s.toUpperCase()));
-                console.log(`>>> Client subscribed to: ${Array.from(ws.subscribedCoins)}`);
             }
         } catch(e){}
     });
 
     ws.on('close', () => {
         clients.delete(ws);
-        console.log(`>>> App Client Disconnected. Total: ${clients.size}`);
         if (clients.size === 0) {
-            console.log('>>> Starting 5m countdown to sleep...');
-            sleepTimer = setTimeout(() => {
-                if (clients.size === 0) stopEngines();
-            }, 300000);
+            sleepTimer = setTimeout(() => { if (clients.size === 0) stopEngines(); }, 300000);
         }
     });
 });
 
 setInterval(() => {
-    if (clients.size > 0) {
-        broadcast({ type: 'ping' });
-    }
-    console.log(`[2026 HEARTBEAT] Clients: ${clients.size} | Engine: ${engineActive ? 'ON' : 'SLEEP'} | Captures: ${stats.total}`);
+    console.log(`[HEARTBEAT] Clients: ${clients.size} | Engine: ${engineActive ? 'ON' : 'SLEEP'} | Total Liq: ${stats.total}`);
 }, 30000);
 
-server.listen(port, () => console.log(`2026 ENGINE LIVE ON ${port}`));
+server.listen(port, '0.0.0.0', () => console.log(`2026 ENGINE LIVE ON ${port}`));
