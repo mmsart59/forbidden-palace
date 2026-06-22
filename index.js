@@ -29,25 +29,28 @@ const server = http.createServer((req, res) => {
 });
 const wss = new WebSocket.Server({ server });
 
-// --- MEMORY & PROXY STATE ---
-const MAX_HISTORY = 1000;
+// --- MEMORY MANAGEMENT ---
+const MAX_HISTORY = 1000; // Limit to 1000 items to prevent "collapsing"
 let liquidationHistory = [];
-let tickerMap = {}; // Cache for Binance Proxy
 let stats = { Binance: 'OFF', Bybit: 'OFF', OKX: 'OFF', total: 0 };
 let clients = new Set();
 let engineActive = false;
 let remoteSockets = new Map();
-let sleepTimer = null;
 
 const broadcast = (payload) => {
     const data = JSON.stringify(payload);
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(data); });
 };
 
+// New function to track data and manage memory
 const trackAndBroadcast = (payload) => {
     stats.total++;
+    // Add to history
     liquidationHistory.push(payload);
-    if (liquidationHistory.length > MAX_HISTORY) liquidationHistory.shift();
+    // Cleanup old data
+    if (liquidationHistory.length > MAX_HISTORY) {
+        liquidationHistory.shift();
+    }
     broadcast(payload);
 };
 
@@ -63,6 +66,7 @@ const connectExch = (name, url, onOpen, onMsg) => {
         if (txt === "pong" || txt === "") return;
         try {
             const d = JSON.parse(txt);
+            if (d.e === "serverShutdown") { console.log(`!!! [${name}] SHUTDOWN WARNING`); return; }
             onMsg(ws, d);
         } catch(e){}
     });
@@ -72,7 +76,7 @@ const connectExch = (name, url, onOpen, onMsg) => {
     });
     ws.on('close', () => {
         stats[name] = 'OFF';
-        if (engineActive) setTimeout(() => { if(engineActive) connectExch(name, url, onOpen, onMsg) }, 5000);
+        if (engineActive) setTimeout(() => connectExch(name, url, onOpen, onMsg), 5000);
     });
     remoteSockets.set(name, ws);
 };
@@ -80,10 +84,10 @@ const connectExch = (name, url, onOpen, onMsg) => {
 const startEngines = () => {
     if (engineActive) return;
     engineActive = true;
-    console.log('>>> 2026 IGNITION SEQUENCE STARTED');
+    console.log('>>> 2026 IGNITION SEQUENCE');
 
-    // 1. BINANCE LIQUIDATIONS
-    connectExch('BinanceLiq', 'wss://fstream.binance.com/market/ws/!forceOrder@arr', () => {}, (ws, d) => {
+    // 1. BINANCE (Aggregated Firehose)
+    connectExch('Binance', 'wss://fstream.binance.com/market/ws/!forceOrder@arr', () => {}, (ws, d) => {
         const process = (i) => { if(i.e === "forceOrder") {
             const sym = normalize(i.o.s);
             if (TARGET_COINS.has(sym)) {
@@ -95,18 +99,7 @@ const startEngines = () => {
         if(Array.isArray(d)) d.forEach(process); else process(d);
     });
 
-    // 2. BINANCE TICKERS (Proxy Engine)
-    connectExch('BinanceTickers', 'wss://fstream.binance.com/ws/!ticker@arr', () => {}, (ws, d) => {
-        if (!Array.isArray(d)) return;
-        d.forEach(t => {
-            const sym = normalize(t.s);
-            if (TARGET_COINS.has(sym)) {
-                tickerMap[sym] = { p: parseFloat(t.c), v: parseFloat(t.q), c: parseFloat(t.P) };
-            }
-        });
-    });
-
-    // 3. BYBIT
+    // 2. BYBIT (Fixed: Subscribing to specific coins)
     connectExch('Bybit', 'wss://stream.bybit.com/v5/public/linear',
         (ws) => {
             const coins = Array.from(TARGET_COINS);
@@ -118,6 +111,7 @@ const startEngines = () => {
         },
         (ws, d) => {
             if (d.topic && d.topic.startsWith("liquidation") && d.data) {
+                // Bybit V5 liquidation data can be an object or a single-item array
                 const items = Array.isArray(d.data) ? d.data : [d.data];
                 items.forEach(item => {
                     const sym = normalize(item.symbol || item.s);
@@ -133,14 +127,14 @@ const startEngines = () => {
         }
     );
 
-    // 4. OKX
+    // 3. OKX (Public Swap Channel)
     connectExch('OKX', 'wss://ws.okx.com:8443/ws/v5/public',
         (ws) => {
             ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]}));
             ws.pingTimer = setInterval(() => ws.send("ping"), 20000);
         },
         (ws, d) => {
-            if (d.data) {
+            if (d.data && d.data[0]) {
                 d.data.forEach(i => {
                     const sym = normalize(i.instId);
                     if (TARGET_COINS.has(sym)) {
@@ -155,64 +149,28 @@ const startEngines = () => {
 };
 
 const stopEngines = () => {
-    console.log('>>> AUTO-SLEEP ACTIVATED');
     engineActive = false;
-    remoteSockets.forEach(ws => { if(ws.pingTimer) clearInterval(ws.pingTimer); ws.terminate(); });
+    remoteSockets.forEach(ws => { if(ws.pingTimer) clearInterval(ws.pingTimer); ws.close(); });
     remoteSockets.clear();
 };
 
-// --- SELECTIVE TICKER BROADCAST ---
-setInterval(() => {
-    clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN && client.subscribedCoins && client.subscribedCoins.size > 0) {
-            let updates = {};
-            client.subscribedCoins.forEach(sym => {
-                if (tickerMap[sym]) updates[sym] = tickerMap[sym];
-            });
-            if (Object.keys(updates).length > 0) {
-                client.send(JSON.stringify({ type: 'ticker_batch', data: updates }));
-            }
-        }
-    });
-}, 3000);
-
 wss.on('connection', (ws) => {
-    console.log('>>> NEW APP CONNECTION');
-    if (sleepTimer) { clearTimeout(sleepTimer); sleepTimer = null; }
-    
     clients.add(ws);
-    ws.subscribedCoins = new Set();
-    startEngines();
 
-    // Send history
+    // Catch up: Send the last 50 liquidations to new client so they aren't empty
     liquidationHistory.slice(-50).forEach(item => ws.send(JSON.stringify(item)));
 
-    ws.on('message', (msg) => {
-        try {
-            const cmd = JSON.parse(msg.toString());
-            if (cmd.op === 'subscribe_tickers') {
-                ws.subscribedCoins = new Set(cmd.args.map(s => s.toUpperCase()));
-                console.log(`>>> Client subscribed to: ${Array.from(ws.subscribedCoins)}`);
-            }
-        } catch(e){}
-    });
-
+    startEngines();
     ws.on('close', () => {
         clients.delete(ws);
-        console.log(`>>> App Client Left. Remaining: ${clients.size}`);
-        if (clients.size === 0) {
-            console.log('>>> Last client left. 5m countdown to sleep started...');
-            sleepTimer = setTimeout(() => {
-                if (clients.size === 0) stopEngines();
-            }, 300000);
-        }
+        if (clients.size === 0) stopEngines();
     });
 });
 
 setInterval(() => {
     if (clients.size > 0) {
         broadcast({ type: 'ping' });
-        console.log(`[HEARTBEAT] Apps: ${clients.size} | Eng: ${engineActive ? 'ON' : 'SLEEP'} | Liq: ${stats.total}`);
+        console.log(`[2026 HEARTBEAT] Clients: ${clients.size} | History: ${liquidationHistory.length} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX}`);
     }
 }, 30000);
 
