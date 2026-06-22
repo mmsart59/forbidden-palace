@@ -25,21 +25,31 @@ const normalize = (s) => s.replace(/[-_]/g, '').replace('SWAP', '').replace('XBT
 const port = process.env.PORT || 10000;
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('PALACE SMART ENGINE v3 ACTIVE');
+    res.end('2026 PALACE ENGINE IS LIVE');
 });
 const wss = new WebSocket.Server({ server });
 
-// --- MEMORY & STATE ---
+// --- MEMORY & PROXY STATE ---
 const MAX_HISTORY = 1000;
 let liquidationHistory = [];
-let tickerMap = {}; // symbol -> { p, v, c }
+let tickerMap = {}; // New: symbol -> { p, v, c } for Binance Proxy
 let stats = { Binance: 'OFF', Bybit: 'OFF', OKX: 'OFF', total: 0 };
+let clients = new Set();
 let engineActive = false;
 let remoteSockets = new Map();
 
 const broadcast = (payload) => {
     const data = JSON.stringify(payload);
-    wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(data); });
+    clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(data); });
+};
+
+const trackAndBroadcast = (payload) => {
+    stats.total++;
+    liquidationHistory.push(payload);
+    if (liquidationHistory.length > MAX_HISTORY) {
+        liquidationHistory.shift();
+    }
+    broadcast(payload);
 };
 
 const connectExch = (name, url, onOpen, onMsg) => {
@@ -54,6 +64,7 @@ const connectExch = (name, url, onOpen, onMsg) => {
         if (txt === "pong" || txt === "") return;
         try {
             const d = JSON.parse(txt);
+            if (d.e === "serverShutdown") { console.log(`!!! [${name}] SHUTDOWN WARNING`); return; }
             onMsg(ws, d);
         } catch(e){}
     });
@@ -71,25 +82,22 @@ const connectExch = (name, url, onOpen, onMsg) => {
 const startEngines = () => {
     if (engineActive) return;
     engineActive = true;
+    console.log('>>> 2026 IGNITION SEQUENCE');
 
-    // 1. BINANCE LIQUIDATIONS
-    connectExch('BinanceLiq', 'wss://fstream.binance.com/market/ws/!forceOrder@arr', () => {}, (ws, d) => {
+    // 1. BINANCE (Aggregated Firehose)
+    connectExch('Binance', 'wss://fstream.binance.com/market/ws/!forceOrder@arr', () => {}, (ws, d) => {
         const process = (i) => { if(i.e === "forceOrder") {
             const sym = normalize(i.o.s);
             if (TARGET_COINS.has(sym)) {
                 const p = parseFloat(i.o.ap || i.o.p);
                 const q = parseFloat(i.o.q);
-                const liq = { exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), value: p * q, price: p, quantity: q };
-                liquidationHistory.push(liq);
-                if (liquidationHistory.length > MAX_HISTORY) liquidationHistory.shift();
-                broadcast(liq);
-                stats.total++;
+                trackAndBroadcast({ exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), value: p * q, price: p, quantity: q });
             }
         }};
         if(Array.isArray(d)) d.forEach(process); else process(d);
     });
 
-    // 2. BINANCE TICKERS (Proxy Engine)
+    // 2. BINANCE TICKERS (NEW: Proxy Engine)
     connectExch('BinanceTickers', 'wss://fstream.binance.com/ws/!ticker@arr', () => {}, (ws, d) => {
         if (!Array.isArray(d)) return;
         d.forEach(t => {
@@ -100,7 +108,7 @@ const startEngines = () => {
         });
     });
 
-    // 3. BYBIT LIQUIDATIONS
+    // 3. BYBIT
     connectExch('Bybit', 'wss://stream.bybit.com/v5/public/linear',
         (ws) => {
             const coins = Array.from(TARGET_COINS);
@@ -112,39 +120,35 @@ const startEngines = () => {
         },
         (ws, d) => {
             if (d.topic && d.topic.startsWith("liquidation") && d.data) {
-                const item = d.data;
-                const sym = normalize(item.symbol);
-                if (TARGET_COINS.has(sym)) {
-                    const p = parseFloat(item.price);
-                    const q = parseFloat(item.size);
-                    const liq = { exch: 'Bybit', symbol: sym, side: item.side.toLowerCase(), value: p * q, price: p, quantity: q };
-                    liquidationHistory.push(liq);
-                    if (liquidationHistory.length > MAX_HISTORY) liquidationHistory.shift();
-                    broadcast(liq);
-                    stats.total++;
-                }
+                const items = Array.isArray(d.data) ? d.data : [d.data];
+                items.forEach(item => {
+                    const sym = normalize(item.symbol || item.s);
+                    if (TARGET_COINS.has(sym)) {
+                        const p = parseFloat(item.price || item.p);
+                        const q = parseFloat(item.size || item.v);
+                        if (!isNaN(p) && !isNaN(q)) {
+                            trackAndBroadcast({ exch: 'Bybit', symbol: sym, side: item.side.toLowerCase(), value: p * q, price: p, quantity: q });
+                        }
+                    }
+                });
             }
         }
     );
 
-    // 4. OKX LIQUIDATIONS
+    // 4. OKX
     connectExch('OKX', 'wss://ws.okx.com:8443/ws/v5/public',
         (ws) => {
             ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]}));
             ws.pingTimer = setInterval(() => ws.send("ping"), 20000);
         },
         (ws, d) => {
-            if (d.data) {
+            if (d.data && d.data[0]) {
                 d.data.forEach(i => {
                     const sym = normalize(i.instId);
                     if (TARGET_COINS.has(sym)) {
                         const p = parseFloat(i.bkPx);
                         const q = parseFloat(i.sz);
-                        const liq = { exch: 'OKX', symbol: sym, side: i.side.toLowerCase(), value: p * q, price: p, quantity: q };
-                        liquidationHistory.push(liq);
-                        if (liquidationHistory.length > MAX_HISTORY) liquidationHistory.shift();
-                        broadcast(liq);
-                        stats.total++;
+                        trackAndBroadcast({ exch: 'OKX', symbol: sym, side: i.side.toLowerCase(), value: p * q, price: p, quantity: q });
                     }
                 });
             }
@@ -152,7 +156,13 @@ const startEngines = () => {
     );
 };
 
-// --- SELECTIVE BROADCAST (Ticker Engine) ---
+const stopEngines = () => {
+    engineActive = false;
+    remoteSockets.forEach(ws => { if(ws.pingTimer) clearInterval(ws.pingTimer); ws.close(); });
+    remoteSockets.clear();
+};
+
+// --- SELECTIVE BROADCAST (Smart Proxy Logic) ---
 setInterval(() => {
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN && client.subscribedCoins && client.subscribedCoins.size > 0) {
@@ -168,28 +178,34 @@ setInterval(() => {
 }, 3000);
 
 wss.on('connection', (ws) => {
-    ws.subscribedCoins = new Set();
-    startEngines();
+    clients.add(ws);
+    ws.subscribedCoins = new Set(); // Track selection for this specific client
 
-    // Send history snippet
-    liquidationHistory.slice(-50).forEach(l => ws.send(JSON.stringify(l)));
+    liquidationHistory.slice(-50).forEach(item => ws.send(JSON.stringify(item)));
+
+    startEngines();
 
     ws.on('message', (msg) => {
         try {
             const cmd = JSON.parse(msg.toString());
             if (cmd.op === 'subscribe_tickers') {
                 ws.subscribedCoins = new Set(cmd.args.map(s => s.toUpperCase()));
+                console.log(`Client subscribed to: ${Array.from(ws.subscribedCoins)}`);
             }
         } catch(e){}
     });
 
     ws.on('close', () => {
-        if (wss.clients.size === 0) {
-            engineActive = false;
-            remoteSockets.forEach(s => s.close());
-            remoteSockets.clear();
-        }
+        clients.delete(ws);
+        if (clients.size === 0) stopEngines();
     });
 });
 
-server.listen(port, () => console.log(`SMART ENGINE ON ${port}`));
+setInterval(() => {
+    if (clients.size > 0) {
+        broadcast({ type: 'ping' });
+        console.log(`[2026 HEARTBEAT] Clients: ${clients.size} | Captures: ${stats.total} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX}`);
+    }
+}, 30000);
+
+server.listen(port, () => console.log(`2026 ENGINE LIVE ON ${port}`));
