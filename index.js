@@ -25,33 +25,21 @@ const normalize = (s) => s.replace(/[-_]/g, '').replace('SWAP', '').replace('XBT
 const port = process.env.PORT || 10000;
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('2026 PALACE ENGINE IS LIVE');
+    res.end('PALACE SMART ENGINE v3 ACTIVE');
 });
 const wss = new WebSocket.Server({ server });
 
-// --- MEMORY MANAGEMENT ---
-const MAX_HISTORY = 1000; // Limit to 1000 items to prevent "collapsing"
+// --- MEMORY & STATE ---
+const MAX_HISTORY = 1000;
 let liquidationHistory = [];
+let tickerMap = {}; // symbol -> { p, v, c }
 let stats = { Binance: 'OFF', Bybit: 'OFF', OKX: 'OFF', total: 0 };
-let clients = new Set();
 let engineActive = false;
 let remoteSockets = new Map();
 
 const broadcast = (payload) => {
     const data = JSON.stringify(payload);
-    clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(data); });
-};
-
-// New function to track data and manage memory
-const trackAndBroadcast = (payload) => {
-    stats.total++;
-    // Add to history
-    liquidationHistory.push(payload);
-    // Cleanup old data
-    if (liquidationHistory.length > MAX_HISTORY) {
-        liquidationHistory.shift();
-    }
-    broadcast(payload);
+    wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(data); });
 };
 
 const connectExch = (name, url, onOpen, onMsg) => {
@@ -66,7 +54,6 @@ const connectExch = (name, url, onOpen, onMsg) => {
         if (txt === "pong" || txt === "") return;
         try {
             const d = JSON.parse(txt);
-            if (d.e === "serverShutdown") { console.log(`!!! [${name}] SHUTDOWN WARNING`); return; }
             onMsg(ws, d);
         } catch(e){}
     });
@@ -84,22 +71,36 @@ const connectExch = (name, url, onOpen, onMsg) => {
 const startEngines = () => {
     if (engineActive) return;
     engineActive = true;
-    console.log('>>> 2026 IGNITION SEQUENCE');
 
-    // 1. BINANCE (Aggregated Firehose)
-    connectExch('Binance', 'wss://fstream.binance.com/market/ws/!forceOrder@arr', () => {}, (ws, d) => {
+    // 1. BINANCE LIQUIDATIONS
+    connectExch('BinanceLiq', 'wss://fstream.binance.com/market/ws/!forceOrder@arr', () => {}, (ws, d) => {
         const process = (i) => { if(i.e === "forceOrder") {
             const sym = normalize(i.o.s);
             if (TARGET_COINS.has(sym)) {
                 const p = parseFloat(i.o.ap || i.o.p);
                 const q = parseFloat(i.o.q);
-                trackAndBroadcast({ exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), value: p * q, price: p, quantity: q });
+                const liq = { exch: 'Binance', symbol: sym, side: i.o.S.toLowerCase(), value: p * q, price: p, quantity: q };
+                liquidationHistory.push(liq);
+                if (liquidationHistory.length > MAX_HISTORY) liquidationHistory.shift();
+                broadcast(liq);
+                stats.total++;
             }
         }};
         if(Array.isArray(d)) d.forEach(process); else process(d);
     });
 
-    // 2. BYBIT (Fixed: Subscribing to specific coins)
+    // 2. BINANCE TICKERS (Proxy Engine)
+    connectExch('BinanceTickers', 'wss://fstream.binance.com/ws/!ticker@arr', () => {}, (ws, d) => {
+        if (!Array.isArray(d)) return;
+        d.forEach(t => {
+            const sym = normalize(t.s);
+            if (TARGET_COINS.has(sym)) {
+                tickerMap[sym] = { p: parseFloat(t.c), v: parseFloat(t.q), c: parseFloat(t.P) };
+            }
+        });
+    });
+
+    // 3. BYBIT LIQUIDATIONS
     connectExch('Bybit', 'wss://stream.bybit.com/v5/public/linear',
         (ws) => {
             const coins = Array.from(TARGET_COINS);
@@ -111,36 +112,39 @@ const startEngines = () => {
         },
         (ws, d) => {
             if (d.topic && d.topic.startsWith("liquidation") && d.data) {
-                // Bybit V5 liquidation data can be an object or a single-item array
-                const items = Array.isArray(d.data) ? d.data : [d.data];
-                items.forEach(item => {
-                    const sym = normalize(item.symbol || item.s);
-                    if (TARGET_COINS.has(sym)) {
-                        const p = parseFloat(item.price || item.p);
-                        const q = parseFloat(item.size || item.v);
-                        if (!isNaN(p) && !isNaN(q)) {
-                            trackAndBroadcast({ exch: 'Bybit', symbol: sym, side: item.side.toLowerCase(), value: p * q, price: p, quantity: q });
-                        }
-                    }
-                });
+                const item = d.data;
+                const sym = normalize(item.symbol);
+                if (TARGET_COINS.has(sym)) {
+                    const p = parseFloat(item.price);
+                    const q = parseFloat(item.size);
+                    const liq = { exch: 'Bybit', symbol: sym, side: item.side.toLowerCase(), value: p * q, price: p, quantity: q };
+                    liquidationHistory.push(liq);
+                    if (liquidationHistory.length > MAX_HISTORY) liquidationHistory.shift();
+                    broadcast(liq);
+                    stats.total++;
+                }
             }
         }
     );
 
-    // 3. OKX (Public Swap Channel)
+    // 4. OKX LIQUIDATIONS
     connectExch('OKX', 'wss://ws.okx.com:8443/ws/v5/public',
         (ws) => {
             ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]}));
             ws.pingTimer = setInterval(() => ws.send("ping"), 20000);
         },
         (ws, d) => {
-            if (d.data && d.data[0]) {
+            if (d.data) {
                 d.data.forEach(i => {
                     const sym = normalize(i.instId);
                     if (TARGET_COINS.has(sym)) {
                         const p = parseFloat(i.bkPx);
                         const q = parseFloat(i.sz);
-                        trackAndBroadcast({ exch: 'OKX', symbol: sym, side: i.side.toLowerCase(), value: p * q, price: p, quantity: q });
+                        const liq = { exch: 'OKX', symbol: sym, side: i.side.toLowerCase(), value: p * q, price: p, quantity: q };
+                        liquidationHistory.push(liq);
+                        if (liquidationHistory.length > MAX_HISTORY) liquidationHistory.shift();
+                        broadcast(liq);
+                        stats.total++;
                     }
                 });
             }
@@ -148,30 +152,44 @@ const startEngines = () => {
     );
 };
 
-const stopEngines = () => {
-    engineActive = false;
-    remoteSockets.forEach(ws => { if(ws.pingTimer) clearInterval(ws.pingTimer); ws.close(); });
-    remoteSockets.clear();
-};
+// --- SELECTIVE BROADCAST (Ticker Engine) ---
+setInterval(() => {
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN && client.subscribedCoins && client.subscribedCoins.size > 0) {
+            let updates = {};
+            client.subscribedCoins.forEach(sym => {
+                if (tickerMap[sym]) updates[sym] = tickerMap[sym];
+            });
+            if (Object.keys(updates).length > 0) {
+                client.send(JSON.stringify({ type: 'ticker_batch', data: updates }));
+            }
+        }
+    });
+}, 3000);
 
 wss.on('connection', (ws) => {
-    clients.add(ws);
-
-    // Catch up: Send the last 50 liquidations to new client so they aren't empty
-    liquidationHistory.slice(-50).forEach(item => ws.send(JSON.stringify(item)));
-
+    ws.subscribedCoins = new Set();
     startEngines();
+
+    // Send history snippet
+    liquidationHistory.slice(-50).forEach(l => ws.send(JSON.stringify(l)));
+
+    ws.on('message', (msg) => {
+        try {
+            const cmd = JSON.parse(msg.toString());
+            if (cmd.op === 'subscribe_tickers') {
+                ws.subscribedCoins = new Set(cmd.args.map(s => s.toUpperCase()));
+            }
+        } catch(e){}
+    });
+
     ws.on('close', () => {
-        clients.delete(ws);
-        if (clients.size === 0) stopEngines();
+        if (wss.clients.size === 0) {
+            engineActive = false;
+            remoteSockets.forEach(s => s.close());
+            remoteSockets.clear();
+        }
     });
 });
 
-setInterval(() => {
-    if (clients.size > 0) {
-        broadcast({ type: 'ping' });
-        console.log(`[2026 HEARTBEAT] Clients: ${clients.size} | History: ${liquidationHistory.length} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX}`);
-    }
-}, 30000);
-
-server.listen(port, () => console.log(`2026 ENGINE LIVE ON ${port}`));
+server.listen(port, () => console.log(`SMART ENGINE ON ${port}`));
