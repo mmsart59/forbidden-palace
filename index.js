@@ -51,8 +51,12 @@ const connectExch = (name, url, onOpen, onMsg) => {
 };
 
 const startEngines = () => {
-    if (engineActive) return;
+    if (engineActive) {
+        console.log('>>> [ENGINES] Already running, skipping init.');
+        return;
+    }
     engineActive = true;
+    console.log('>>> [ENGINES] Starting Engines...');
 
     // 1. BINANCE (Correct Topic)
     connectExch('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr', 
@@ -104,8 +108,19 @@ const stopEngines = () => {
 
 wss.on('connection', (ws) => {
     clients.add(ws);
+    console.log(`[SERVER] Client connected. Total clients: ${clients.size}`);
     startEngines();
-    ws.on('close', () => { clients.delete(ws); if (clients.size === 0) stopEngines(); });
+
+    ws.on('message', (msg) => {
+        // Log or handle client messages if needed
+        // console.log(`[SERVER] Received from client: ${msg}`);
+    });
+
+    ws.on('close', () => {
+        clients.delete(ws);
+        console.log(`[SERVER] Client disconnected. Total clients: ${clients.size}`);
+        // Removed stopEngines() to keep Palace alive even if no one is watching
+    });
 });
 
 setInterval(() => {
