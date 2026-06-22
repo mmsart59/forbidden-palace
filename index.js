@@ -62,7 +62,7 @@ const startEngines = () => {
     connectExch('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr', 
         () => { console.log('>>> [BINANCE] GATE OPEN'); }, 
         (ws, d) => {
-            const proc = (i) => { if(i.e === "forceOrder") { stats.total++; broadcast({ exch: 'Binance', symbol: normalize(i.o.s), side: i.o.S === 'BUY' ? 'short' : 'long', value: Math.round(i.o.q * i.o.p) }); } };
+            const proc = (i) => { if(i.e === "forceOrder") { stats.total++; broadcast({ exch: 'Binance', symbol: normalize(i.o.s), side: i.o.S === 'BUY' ? 'short' : 'long', price: i.o.p, quantity: i.o.q, value: Math.round(i.o.q * i.o.p) }); } };
             if(Array.isArray(d)) d.forEach(proc); else proc(d);
         }
     );
@@ -78,7 +78,7 @@ const startEngines = () => {
             if (d.data) {
                 const item = d.data;
                 stats.total++;
-                broadcast({ exch: 'Bybit', symbol: normalize(item.symbol), side: item.side === 'Buy' ? 'short' : 'long', value: Math.round(item.size * item.price) });
+                broadcast({ exch: 'Bybit', symbol: normalize(item.symbol), side: item.side === 'Buy' ? 'short' : 'long', price: item.price, quantity: item.size, value: Math.round(item.size * item.price) });
             }
         }
     );
@@ -94,7 +94,7 @@ const startEngines = () => {
             if (d.data && d.data[0]) {
                 const item = d.data[0];
                 stats.total++;
-                broadcast({ exch: 'OKX', symbol: normalize(item.instId), side: item.side === 'buy' ? 'short' : 'long', value: Math.round(item.sz * item.bkPx) });
+                broadcast({ exch: 'OKX', symbol: normalize(item.instId), side: item.side === 'buy' ? 'short' : 'long', price: item.bkPx, quantity: item.sz, value: Math.round(item.sz * item.bkPx) });
             }
         }
     );
