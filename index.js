@@ -23,10 +23,25 @@ const normalize = (s) => s.replace(/[-_]/g, '').replace('SWAP', '').replace('XBT
 
 const port = process.env.PORT || 10000;
 const server = http.createServer((req, res) => {
+    // RENDER WAKE-UP ENDPOINT
+    if (req.url === '/ping') {
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+        res.end('PONG');
+        return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(getHTML());
 });
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({
+    server,
+    clientTracking: true,
+    maxPayload: 1024 * 1024 // 1MB Limit
+});
+
+// GLOBAL ERROR HANDLING
+process.on('uncaughtException', (err) => console.error('FATAL EXCEPTION:', err));
+process.on('unhandledRejection', (reason) => console.error('UNHANDLED REJECTION:', reason));
 
 let stats = { Binance: 'OFF', Bybit: 'OFF', OKX: 'OFF', total: 0 };
 let clients = new Set();
@@ -34,8 +49,21 @@ let engineActive = false;
 let remoteSockets = new Map();
 
 const broadcast = (payload) => {
-    const data = JSON.stringify(payload);
-    clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(data); });
+    try {
+        const data = JSON.stringify(payload);
+        clients.forEach(c => {
+            if (c.readyState === WebSocket.OPEN) {
+                try {
+                    c.send(data);
+                } catch (e) {
+                    console.error('[SERVER] Broadcast send error:', e.message);
+                    clients.delete(c);
+                }
+            }
+        });
+    } catch (e) {
+        console.error('[SERVER] Broadcast stringify error:', e.message);
+    }
 };
 
 const connectExch = (name, url, onOpen, onMsg) => {
