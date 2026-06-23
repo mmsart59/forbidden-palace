@@ -50,6 +50,7 @@ let remoteSockets = new Map();
 
 // --- PROXY DATA STORE ---
 let tickerCache = {}; // Stores { symbol: { p, v, c } }
+let globalTickerCache = {}; // Persistent store for new clients
 let subscribedTickers = new Set(); // Symbols currently needed by mobile clients
 let tickerEngineActive = false;
 
@@ -117,30 +118,38 @@ const startEngines = () => {
         }
     );
 
-    // 2. BYBIT (Corrected V5 Topic)
+    // 2. BYBIT (Corrected V5 AllLiquidation Topic - 2026)
     connectExch('Bybit', 'wss://stream.bytick.com/v5/public/linear', 
         (ws) => {
             console.log('>>> [BYBIT] GATE OPEN');
-            ws.send(JSON.stringify({"op": "subscribe", "args": ["liquidation.linear"]})); // Global Linear Topic
+            // In 2026, we subscribe to specific symbols for full transparency
+            const coins = Array.from(TARGET_COINS);
+            for (let i = 0; i < coins.length; i += 10) {
+                const chunk = coins.slice(i, i + 10).map(s => `allLiquidation.${s}`);
+                ws.send(JSON.stringify({"op": "subscribe", "args": chunk}));
+            }
             ws.pingTimer = setInterval(() => ws.send(JSON.stringify({"op": "ping"})), 20000);
         }, 
         (ws, d) => {
+            console.log('[RAW BYBIT]', JSON.stringify(d));
             if (d.data) {
-                const item = d.data;
-                stats.total++;
-                broadcast({
-                    exch: 'Bybit',
-                    symbol: normalize(item.symbol),
-                    side: item.side === 'Buy' ? 'short' : 'long',
-                    price: String(item.price),
-                    quantity: String(item.size),
-                    value: Number(item.size * item.price) || 0
-                });
+                const process = (item) => {
+                    stats.total++;
+                    broadcast({
+                        exch: 'Bybit',
+                        symbol: normalize(item.s || item.symbol),
+                        side: item.S === 'Buy' ? 'short' : 'long', // Buy order = Short liquidation
+                        price: String(item.p || item.price),
+                        quantity: String(item.v || item.size),
+                        value: Number((item.v || item.size) * (item.p || item.price)) || 0
+                    });
+                };
+                if (Array.isArray(d.data)) d.data.forEach(process); else process(d.data);
             }
         }
     );
 
-    // 3. OKX (Corrected instType)
+    // 3. OKX (Corrected Nested Structure - 2026)
     connectExch('OKX', 'wss://ws.okx.com:8443/ws/v5/public', 
         (ws) => {
             console.log('>>> [OKX] GATE OPEN');
@@ -148,16 +157,22 @@ const startEngines = () => {
             ws.pingTimer = setInterval(() => ws.send("ping"), 20000);
         }, 
         (ws, d) => {
-            if (d.data && d.data[0]) {
-                const item = d.data[0];
-                stats.total++;
-                broadcast({
-                    exch: 'OKX',
-                    symbol: normalize(item.instId),
-                    side: item.side === 'buy' ? 'short' : 'long',
-                    price: String(item.bkPx),
-                    quantity: String(item.sz),
-                    value: Number(item.sz * item.bkPx) || 0
+            console.log('[RAW OKX]', JSON.stringify(d));
+            if (d.data && Array.isArray(d.data)) {
+                d.data.forEach(outer => {
+                    const process = (inner) => {
+                        stats.total++;
+                        broadcast({
+                            exch: 'OKX',
+                            symbol: normalize(inner.instId || outer.instId),
+                            side: inner.side === 'buy' ? 'short' : 'long',
+                            price: String(inner.bkPx),
+                            quantity: String(inner.sz),
+                            value: Number(inner.sz * inner.bkPx) || 0
+                        });
+                    };
+                    if (outer.side) process(outer); // Flat
+                    else if (outer.data && Array.isArray(outer.data)) outer.data.forEach(process); // Nested
                 });
             }
         }
@@ -185,8 +200,11 @@ const startTickerEngine = () => {
 
     ws.on('message', (data) => {
         const d = JSON.parse(data);
-        if (d.e === "24hrTicker") {
-            tickerCache[d.s] = { p: d.c, v: d.q, c: d.P };
+        const item = d.data || d;
+        if (item.e === "24hrTicker") {
+            const entry = { p: item.c, v: item.q, c: item.P };
+            tickerCache[item.s] = entry;
+            globalTickerCache[normalize(item.s)] = entry;
         }
     });
 
@@ -220,11 +238,20 @@ wss.on('connection', (ws) => {
     startEngines();
     startTickerEngine();
 
+    // Send current prices immediately
+    if (Object.keys(globalTickerCache).length > 0) {
+        ws.send(JSON.stringify({ type: 'tickers', data: globalTickerCache }));
+    }
+
     ws.on('message', (msg) => {
         try {
             const j = JSON.parse(msg);
             if (j.op === 'subscribe_tickers') {
-                j.args.forEach(s => subscribedTickers.add(s.toUpperCase()));
+                j.args.forEach(s => {
+                    let symbol = s.toUpperCase();
+                    if (!symbol.endsWith('USDT') && symbol.length <= 4) symbol += 'USDT';
+                    subscribedTickers.add(symbol);
+                });
                 const tickerWs = remoteSockets.get('BinanceTickers');
                 if (tickerWs) updateTickerSubscriptions(tickerWs);
             }
@@ -237,7 +264,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// HEARTBEAT: KILL DEAD CLIENTS (STOPS THE "10 CLIENTS" PROBLEM)
+// HEARTBEAT & TICKER BROADCAST
 const interval = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) {
@@ -250,16 +277,21 @@ const interval = setInterval(() => {
 
     if (clients.size > 0) {
         broadcast({ type: 'ping' });
-
-        // Broadcast Ticker Batch
-        if (Object.keys(tickerCache).length > 0) {
-            broadcast({ type: 'ticker_batch', data: tickerCache });
-            tickerCache = {};
-        }
-
         console.log(`--- [HEARTBEAT] Clients:${clients.size} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX} ---`);
     }
 }, 30000);
+
+// FASTER TICKER BROADCAST (Every 2 seconds)
+setInterval(() => {
+    if (clients.size > 0 && Object.keys(tickerCache).length > 0) {
+        const normalizedBatch = {};
+        for (const s in tickerCache) {
+            normalizedBatch[normalize(s)] = tickerCache[s];
+        }
+        broadcast({ type: 'tickers', data: normalizedBatch });
+        tickerCache = {};
+    }
+}, 2000);
 
 server.listen(port, () => console.log(`Palace LIVE on ${port}`));
 
