@@ -77,7 +77,8 @@ const connectExch = (name, url, onOpen, onMsg) => {
     ws.on('message', (m) => { try { onMsg(ws, JSON.parse(m)); } catch(e){} });
     ws.on('error', () => { stats[name] = 'ERROR'; });
     ws.on('close', () => { 
-        stats[name] = 'OFF'; 
+        if (ws.pingTimer) clearInterval(ws.pingTimer);
+        stats[name] = 'OFF';
         if (engineActive) setTimeout(() => connectExch(name, url, onOpen, onMsg), 5000); 
     });
     remoteSockets.set(name, ws);
@@ -91,10 +92,14 @@ const startEngines = () => {
     engineActive = true;
     console.log('>>> [ENGINES] Starting Engines...');
 
-    // 1. BINANCE (Correct Topic)
-    connectExch('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr', 
-        () => { console.log('>>> [BINANCE] GATE OPEN'); }, 
+    // 1. BINANCE (Correct Topic - June 2026 Market Route)
+    connectExch('Binance', 'wss://fstream.binance.com/market/ws/!forceOrder@arr',
+        (ws) => {
+            console.log('>>> [BINANCE] GATE OPEN');
+            ws.pingTimer = setInterval(() => { if(ws.readyState === WebSocket.OPEN) ws.ping(); }, 30000);
+        },
         (ws, d) => {
+            console.log('[RAW BINANCE]', JSON.stringify(d)); // Capturing log for debugging
             const proc = (i) => {
                 if(i.e === "forceOrder") {
                     stats.total++;
@@ -104,7 +109,7 @@ const startEngines = () => {
                         side: i.o.S === 'BUY' ? 'short' : 'long',
                         price: String(i.o.p),
                         quantity: String(i.o.q),
-                        value: Number(i.o.q * i.o.p)
+                        value: Number(i.o.q * i.o.p) || 0
                     });
                 }
             };
@@ -129,7 +134,7 @@ const startEngines = () => {
                     side: item.side === 'Buy' ? 'short' : 'long',
                     price: String(item.price),
                     quantity: String(item.size),
-                    value: Number(item.size * item.price)
+                    value: Number(item.size * item.price) || 0
                 });
             }
         }
@@ -152,7 +157,7 @@ const startEngines = () => {
                     side: item.side === 'buy' ? 'short' : 'long',
                     price: String(item.bkPx),
                     quantity: String(item.sz),
-                    value: Number(item.sz * item.bkPx)
+                    value: Number(item.sz * item.bkPx) || 0
                 });
             }
         }
@@ -170,11 +175,12 @@ const startTickerEngine = () => {
     tickerEngineActive = true;
     console.log('>>> [PROXY] Starting Binance Ticker Engine...');
 
-    const ws = new WebSocket('wss://fstream.binance.com/ws');
+    const ws = new WebSocket('wss://fstream.binance.com/market/ws');
 
     ws.on('open', () => {
         console.log('>>> [PROXY] Binance Ticker Socket Open');
         updateTickerSubscriptions(ws);
+        ws.pingTimer = setInterval(() => { if(ws.readyState === WebSocket.OPEN) ws.ping(); }, 30000);
     });
 
     ws.on('message', (data) => {
@@ -185,6 +191,7 @@ const startTickerEngine = () => {
     });
 
     ws.on('close', () => {
+        if (ws.pingTimer) clearInterval(ws.pingTimer);
         tickerEngineActive = false;
         setTimeout(startTickerEngine, 5000);
     });
