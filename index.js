@@ -162,17 +162,20 @@ const startEngines = () => {
                 d.data.forEach(outer => {
                     const process = (inner) => {
                         stats.total++;
-                        broadcast({
+                        const payload = {
                             exch: 'OKX',
                             symbol: normalize(inner.instId || outer.instId),
                             side: inner.side === 'buy' ? 'short' : 'long',
                             price: String(inner.bkPx),
                             quantity: String(inner.sz),
                             value: Number(inner.sz * inner.bkPx) || 0
-                        });
+                        };
+                        console.log('[PROCESSED OKX]', JSON.stringify(payload));
+                        broadcast(payload);
                     };
                     if (outer.side) process(outer); // Flat
                     else if (outer.data && Array.isArray(outer.data)) outer.data.forEach(process); // Nested
+                    else if (outer.details && Array.isArray(outer.details)) outer.details.forEach(process); // 2026 Nested
                 });
             }
         }
