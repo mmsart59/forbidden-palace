@@ -95,7 +95,19 @@ const startEngines = () => {
     connectExch('Binance', 'wss://fstream.binance.com/ws/!forceOrder@arr', 
         () => { console.log('>>> [BINANCE] GATE OPEN'); }, 
         (ws, d) => {
-            const proc = (i) => { if(i.e === "forceOrder") { stats.total++; broadcast({ exch: 'Binance', symbol: normalize(i.o.s), side: i.o.S === 'BUY' ? 'short' : 'long', price: i.o.p, quantity: i.o.q, value: Math.round(i.o.q * i.o.p) }); } };
+            const proc = (i) => {
+                if(i.e === "forceOrder") {
+                    stats.total++;
+                    broadcast({
+                        exch: 'Binance',
+                        symbol: normalize(i.o.s),
+                        side: i.o.S === 'BUY' ? 'short' : 'long',
+                        price: String(i.o.p),
+                        quantity: String(i.o.q),
+                        value: Number(i.o.q * i.o.p)
+                    });
+                }
+            };
             if(Array.isArray(d)) d.forEach(proc); else proc(d);
         }
     );
@@ -111,7 +123,14 @@ const startEngines = () => {
             if (d.data) {
                 const item = d.data;
                 stats.total++;
-                broadcast({ exch: 'Bybit', symbol: normalize(item.symbol), side: item.side === 'Buy' ? 'short' : 'long', price: item.price, quantity: item.size, value: Math.round(item.size * item.price) });
+                broadcast({
+                    exch: 'Bybit',
+                    symbol: normalize(item.symbol),
+                    side: item.side === 'Buy' ? 'short' : 'long',
+                    price: String(item.price),
+                    quantity: String(item.size),
+                    value: Number(item.size * item.price)
+                });
             }
         }
     );
@@ -127,7 +146,14 @@ const startEngines = () => {
             if (d.data && d.data[0]) {
                 const item = d.data[0];
                 stats.total++;
-                broadcast({ exch: 'OKX', symbol: normalize(item.instId), side: item.side === 'buy' ? 'short' : 'long', price: item.bkPx, quantity: item.sz, value: Math.round(item.sz * item.bkPx) });
+                broadcast({
+                    exch: 'OKX',
+                    symbol: normalize(item.instId),
+                    side: item.side === 'buy' ? 'short' : 'long',
+                    price: String(item.bkPx),
+                    quantity: String(item.sz),
+                    value: Number(item.sz * item.bkPx)
+                });
             }
         }
     );
@@ -180,6 +206,9 @@ const updateTickerSubscriptions = (ws) => {
 
 wss.on('connection', (ws) => {
     clients.add(ws);
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+
     console.log(`[SERVER] Client connected. Total clients: ${clients.size}`);
     startEngines();
     startTickerEngine();
@@ -198,23 +227,32 @@ wss.on('connection', (ws) => {
     ws.on('close', () => {
         clients.delete(ws);
         console.log(`[SERVER] Client disconnected. Total clients: ${clients.size}`);
-        // Removed stopEngines() to keep Palace alive even if no one is watching
     });
 });
 
-setInterval(() => {
+// HEARTBEAT: KILL DEAD CLIENTS (STOPS THE "10 CLIENTS" PROBLEM)
+const interval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            console.log('[SERVER] Terminating ghost client...');
+            return ws.terminate();
+        }
+        ws.isAlive = false;
+        ws.ping();
+    });
+
     if (clients.size > 0) {
         broadcast({ type: 'ping' });
 
         // Broadcast Ticker Batch
         if (Object.keys(tickerCache).length > 0) {
             broadcast({ type: 'ticker_batch', data: tickerCache });
-            tickerCache = {}; // Clear after send
+            tickerCache = {};
         }
 
-        console.log(`--- [HEARTBEAT] Clients:${clients.size} | Total Captures:${stats.total} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX} ---`);
+        console.log(`--- [HEARTBEAT] Clients:${clients.size} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX} ---`);
     }
-}, 10000); // 10s Batch Interval
+}, 30000);
 
 server.listen(port, () => console.log(`Palace LIVE on ${port}`));
 
