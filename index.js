@@ -48,6 +48,11 @@ let clients = new Set();
 let engineActive = false;
 let remoteSockets = new Map();
 
+// --- PROXY DATA STORE ---
+let tickerCache = {}; // Stores { symbol: { p, v, c } }
+let subscribedTickers = new Set(); // Symbols currently needed by mobile clients
+let tickerEngineActive = false;
+
 const broadcast = (payload) => {
     try {
         const data = JSON.stringify(payload);
@@ -134,14 +139,60 @@ const stopEngines = () => {
     remoteSockets.clear();
 };
 
+const startTickerEngine = () => {
+    if (tickerEngineActive) return;
+    tickerEngineActive = true;
+    console.log('>>> [PROXY] Starting Binance Ticker Engine...');
+
+    const ws = new WebSocket('wss://fstream.binance.com/ws');
+
+    ws.on('open', () => {
+        console.log('>>> [PROXY] Binance Ticker Socket Open');
+        updateTickerSubscriptions(ws);
+    });
+
+    ws.on('message', (data) => {
+        const d = JSON.parse(data);
+        if (d.e === "24hrTicker") {
+            tickerCache[d.s] = { p: d.c, v: d.q, c: d.P };
+        }
+    });
+
+    ws.on('close', () => {
+        tickerEngineActive = false;
+        setTimeout(startTickerEngine, 5000);
+    });
+
+    remoteSockets.set('BinanceTickers', ws);
+};
+
+const updateTickerSubscriptions = (ws) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const params = Array.from(subscribedTickers).map(s => `${s.toLowerCase()}@ticker`);
+    if (params.length === 0) return;
+
+    ws.send(JSON.stringify({
+        method: "SUBSCRIBE",
+        params: params,
+        id: Date.now()
+    }));
+};
+
 wss.on('connection', (ws) => {
     clients.add(ws);
     console.log(`[SERVER] Client connected. Total clients: ${clients.size}`);
     startEngines();
+    startTickerEngine();
 
     ws.on('message', (msg) => {
-        // Log or handle client messages if needed
-        // console.log(`[SERVER] Received from client: ${msg}`);
+        try {
+            const j = JSON.parse(msg);
+            if (j.op === 'subscribe_tickers') {
+                j.args.forEach(s => subscribedTickers.add(s.toUpperCase()));
+                const tickerWs = remoteSockets.get('BinanceTickers');
+                if (tickerWs) updateTickerSubscriptions(tickerWs);
+            }
+        } catch (e) {}
     });
 
     ws.on('close', () => {
@@ -154,9 +205,16 @@ wss.on('connection', (ws) => {
 setInterval(() => {
     if (clients.size > 0) {
         broadcast({ type: 'ping' });
+
+        // Broadcast Ticker Batch
+        if (Object.keys(tickerCache).length > 0) {
+            broadcast({ type: 'ticker_batch', data: tickerCache });
+            tickerCache = {}; // Clear after send
+        }
+
         console.log(`--- [HEARTBEAT] Clients:${clients.size} | Total Captures:${stats.total} | B:${stats.Binance} BB:${stats.Bybit} OKX:${stats.OKX} ---`);
     }
-}, 30000);
+}, 10000); // 10s Batch Interval
 
 server.listen(port, () => console.log(`Palace LIVE on ${port}`));
 
