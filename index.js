@@ -146,18 +146,18 @@ const startEngines = () => {
         }
     );
 
-    // 3. OKX
+    // 3. OKX - DEDUPLICATED
     connectExch('OKX', 'wss://ws.okx.com:8443/ws/v5/public', 
         (ws) => {
             console.log('>>> [OKX] LIQUIDATION GATE OPEN');
             ws.send(JSON.stringify({"op": "subscribe", "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]}));
-            ws.pingTimer = setInterval(() => ws.send("ping"), 20000);
+            ws.pingTimer = setInterval(() => { if(ws.readyState === WebSocket.OPEN) ws.send("ping"); }, 20000);
         }, 
         (ws, d) => {
             if (d.data && Array.isArray(d.data)) {
                 d.data.forEach(outer => {
+                    // OKX sends data in a nested structure. We process the most specific one available.
                     const process = (inner) => {
-                        stats.total++;
                         broadcast({
                             exch: 'OKX',
                             symbol: normalize(inner.instId || outer.instId),
@@ -166,10 +166,17 @@ const startEngines = () => {
                             quantity: String(inner.sz),
                             value: Number(inner.sz * inner.bkPx) || 0
                         });
+                        stats.total++;
                     };
-                    if (outer.side) process(outer);
-                    else if (outer.data && Array.isArray(outer.data)) outer.data.forEach(process);
-                    else if (outer.details && Array.isArray(outer.details)) outer.details.forEach(process);
+
+                    // Priority: Detailed data -> Top level data
+                    if (outer.details && Array.isArray(outer.details)) {
+                        outer.details.forEach(process);
+                    } else if (outer.data && Array.isArray(outer.data)) {
+                        outer.data.forEach(process);
+                    } else if (outer.side) {
+                        process(outer);
+                    }
                 });
             }
         }
